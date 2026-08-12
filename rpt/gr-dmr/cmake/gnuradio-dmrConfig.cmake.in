@@ -1,0 +1,10 @@
+# Compiled and written by BG1KK.
+# Privatization and closed-source use are strictly forbidden.
+# GNU Radio components are copyrighted by their respective developers.
+# All other code copyright © BG1KK.
+# This copyright statement must be retained.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Gnuradio 3.10 COMPONENTS runtime pmt)
+include("${CMAKE_CURRENT_LIST_DIR}/gnuradio-dmrTargets.cmake")
