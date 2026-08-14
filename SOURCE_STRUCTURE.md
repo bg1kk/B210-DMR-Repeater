@@ -157,4 +157,8 @@ export OP25_REPEATER_SOURCE_DIR=/path/to/op25/gr-op25_repeater/lib
 export MBELIB_ROOT=/path/to/gr-dsd
 ```
 
+运行完整转发器契约测试时，在配置阶段同时传入
+`DMR_B210_REPEATER_EXAMPLE_CONFIG` 和 `DMR_B210_REPEATER_VECTOR_ROOT`；
+前者指向示例 YAML，后者指向包含 manifest 的 828S 测试向量目录。
+
 随后可在同一个构建目录中直接调用 `make`，例如 `make -C ../build-rpt -j"$(nproc)"`。构建入口不包含部署配置、生产 YAML 和测试 IQ 向量；需要完整生产构建与部署时仍应使用工程根目录的 `CMakeLists.txt` 和 `deploy/` 脚本。

@@ -11,7 +11,14 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
+
+#if defined(__linux__)
+#include <linux/fb.h>
+#include <linux/input.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -67,6 +74,8 @@ struct GuiConfig {
     std::string calibration_password = "14254328";
     int rotation_degrees = 0;
     int kmsdrm_device_index = -1;
+    std::string framebuffer_path = "/dev/fb0";
+    bool framebuffer_direct_output = false;
     std::string font_path =
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
     std::array<double, 2> s9_reference_dbfs{-87.0, -87.0};
@@ -83,6 +92,43 @@ std::string trim(std::string value)
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1U);
 }
+
+#if defined(__linux__)
+std::string read_text_file(const std::filesystem::path& path)
+{
+    std::ifstream stream(path);
+    std::string value;
+    std::getline(stream, value);
+    return trim(value);
+}
+
+std::string select_dsi1_framebuffer(const std::string& fallback)
+{
+    try {
+        const std::filesystem::path drm_root{"/sys/class/drm"};
+        const std::filesystem::path graphics_root{"/sys/class/graphics"};
+        for (const auto& connector : std::filesystem::directory_iterator(drm_root)) {
+            const std::string name = connector.path().filename().string();
+            if (name.find("-DSI-1") == std::string::npos ||
+                read_text_file(connector.path() / "status") != "connected") {
+                continue;
+            }
+            const auto dsi_device = std::filesystem::canonical(connector.path() / "device")
+                                        .parent_path().parent_path();
+            for (const auto& framebuffer : std::filesystem::directory_iterator(graphics_root)) {
+                const std::string fb_name = framebuffer.path().filename().string();
+                if (fb_name.rfind("fb", 0) != 0 || fb_name == "fbcon") continue;
+                if (std::filesystem::canonical(framebuffer.path() / "device") == dsi_device) {
+                    return "/dev/" + fb_name;
+                }
+            }
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        // The configured path remains a safe fallback on nonstandard kernels.
+    }
+    return fallback;
+}
+#endif
 
 GuiConfig load_config(const std::filesystem::path& path)
 {
@@ -105,6 +151,12 @@ GuiConfig load_config(const std::filesystem::path& path)
     }
     if (gui["kmsdrm_device_index"]) {
         config.kmsdrm_device_index = gui["kmsdrm_device_index"].as<int>();
+    }
+    if (gui["framebuffer_path"]) {
+        config.framebuffer_path = gui["framebuffer_path"].as<std::string>();
+    }
+    if (gui["framebuffer_direct_output"]) {
+        config.framebuffer_direct_output = gui["framebuffer_direct_output"].as<bool>();
     }
     if (gui["font_path"]) config.font_path = gui["font_path"].as<std::string>();
     if (gui["s9_reference_dbfs"] && gui["s9_reference_dbfs"].IsSequence()) {
@@ -139,6 +191,9 @@ GuiConfig load_config(const std::filesystem::path& path)
         throw std::runtime_error("invalid GUI network, calibration password or rotation configuration");
     }
     config.rotation_degrees = (config.rotation_degrees % 360 + 360) % 360;
+    if (config.framebuffer_direct_output && config.rotation_degrees != 0) {
+        throw std::runtime_error("direct framebuffer output requires zero display rotation");
+    }
     return config;
 }
 
@@ -357,8 +412,12 @@ const std::array<int, 38> kStandardCtcssToneTenthsHz = {
     1928, 2035, 2107, 2181, 2257, 2336, 2418, 2503
 };
 
-const std::array<int, 14> kCalibrationInputDbm = {
-    0, -10, -20, -30, -40, -50, -60, -70, -80, -90, -100, -110, -120, -121
+const std::array<int, 9> kLowCalibrationInputDbm = {
+    10, 0, -10, -20, -30, -40, -50, -60, -70
+};
+
+const std::array<int, 9> kHighCalibrationInputDbm = {
+    -60, -70, -80, -90, -100, -110, -120, -130, -140
 };
 
 int standard_ctcss_tone(int tone_tenths_hz)
@@ -398,12 +457,14 @@ struct RuntimeState {
     bool online = false;
     bool forwarding_enabled = false;
     bool rf_running = false;
+    bool rf_fault = false;
     bool stale = true;
     std::string active_profile;
     std::string repeater_version = "读取中";
     int repeater_build_sequence = 0;
     std::string working_mode = "idle";
     std::string gain_mode = "custom";
+    std::string gain_selection_mode = "manual";
     int configured_profiles = 0;
     std::uint64_t recording_storage_bytes = 0;
     std::uint64_t recording_storage_limit_bytes = 1000000000ULL;
@@ -417,7 +478,7 @@ struct RuntimeState {
 
 struct CalibrationUiState {
     int rx_channel = 0;
-    std::string band = "strong";
+    std::string band = "low";
     std::string session_id;
     std::string state = "idle";
     int next_input_dbm = 0;
@@ -426,8 +487,6 @@ struct CalibrationUiState {
     std::array<std::optional<int>, 4> column_gain{};
     std::array<std::map<int, std::pair<double, double>>, 4> column_points{};
     int selected_column = 0;
-    std::optional<int> selected_input_dbm;
-    int scroll_row = 0;
     bool authorized = false;
     std::string password_input;
     std::string password_error;
@@ -534,6 +593,10 @@ public:
     GuiApp(GuiConfig config, bool stop_only)
         : config_(std::move(config)), client_(config_), stop_only_(stop_only)
     {
+        for (const std::string& profile_id : config_.profile_ids) {
+            if (quick_profile_ids_.size() >= 3U) break;
+            quick_profile_ids_.push_back(profile_id);
+        }
     }
 
     int run()
@@ -556,6 +619,40 @@ public:
             s_meter(-67.0, -87.0).label == "S9 +20 dB" &&
             s_meter(-140.0, -87.0).lit_segments == 0 &&
             elapsed_clock(started) == "01:01:01";
+    }
+
+    void configure_qa_view(const std::string& view)
+    {
+        if (view == "home") {
+            page_ = 0;
+        } else if (view == "channels") {
+            page_ = 1;
+            channel_page_ = 0;
+        } else if (view == "detail") {
+            page_ = 1;
+            channel_page_ = 1;
+            if (!config_.profile_ids.empty()) {
+                detail_profile_id_ = config_.profile_ids.front();
+            }
+        } else if (view == "parameters") {
+            page_ = 2;
+        } else if (view == "status") {
+            page_ = 3;
+        } else if (view == "password") {
+            page_ = 4;
+            calibration_.authorized = false;
+        } else if (view == "calibration" || view == "dialog") {
+            page_ = 4;
+            calibration_.authorized = true;
+            if (view == "dialog") {
+                calibration_.state = "active";
+                calibration_.session_id = "qa-layout";
+                calibration_.completed_points = 5;
+                calibration_leave_dialog_ = true;
+            }
+        } else {
+            throw std::runtime_error("unknown QA view: " + view);
+        }
     }
 
 private:
@@ -589,7 +686,12 @@ private:
 
     void initialize_sdl()
     {
+        if (config_.framebuffer_direct_output &&
+            SDL_setenv("SDL_VIDEODRIVER", "dummy", 1) != 0) {
+            throw std::runtime_error("cannot select direct framebuffer video driver");
+        }
         if (config_.kmsdrm_device_index >= 0 &&
+            !config_.framebuffer_direct_output &&
             SDL_setenv("SDL_KMSDRM_DEVICE_INDEX",
                        std::to_string(config_.kmsdrm_device_index).c_str(),
                        1) != 0) {
@@ -602,12 +704,64 @@ private:
             SDL_WINDOWPOS_UNDEFINED, kWidth, kHeight,
             SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_BORDERLESS);
         if (!window_) throw std::runtime_error("cannot create kiosk window");
-        renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-        if (!renderer_) renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        const char* video_driver = SDL_GetCurrentVideoDriver();
+        const bool kmsdrm = video_driver && std::string(video_driver) == "kmsdrm";
+        if (kmsdrm) {
+            // Pi5 uses separate V3D render and RP1 DSI DRM devices. Rendering
+            // through EGL can leave the DSI plane black even though KMS owns it.
+            renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        } else {
+            renderer_ = SDL_CreateRenderer(window_, -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        }
+        if (!renderer_ && kmsdrm) {
+            renderer_ = SDL_CreateRenderer(window_, -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        }
+        if (!renderer_) {
+            renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        }
         if (!renderer_) throw std::runtime_error("cannot create kiosk renderer");
+        SDL_RendererInfo renderer_info{};
+        if (SDL_GetRendererInfo(renderer_, &renderer_info) == 0) {
+            std::cerr << "dmr_b210_gui: SDL renderer=" << renderer_info.name
+                      << " video=" << (video_driver ? video_driver : "unknown")
+                      << '\n';
+        }
         canvas_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA8888,
             SDL_TEXTUREACCESS_TARGET, kWidth, kHeight);
         if (!canvas_) throw std::runtime_error("cannot create kiosk canvas");
+#if defined(__linux__)
+        if (config_.framebuffer_direct_output) {
+            const std::string framebuffer_path = select_dsi1_framebuffer(config_.framebuffer_path);
+            framebuffer_fd_ = ::open(framebuffer_path.c_str(), O_RDWR | O_CLOEXEC);
+            if (framebuffer_fd_ < 0) {
+                throw std::runtime_error("cannot open configured framebuffer");
+            }
+            if (ioctl(framebuffer_fd_, FBIOBLANK, FB_BLANK_UNBLANK) != 0) {
+                std::cerr << "dmr_b210_gui: cannot unblank direct framebuffer\n";
+            }
+            if (ioctl(framebuffer_fd_, FBIOGET_FSCREENINFO, &framebuffer_fix_) != 0 ||
+                ioctl(framebuffer_fd_, FBIOGET_VSCREENINFO, &framebuffer_var_) != 0 ||
+                framebuffer_var_.bits_per_pixel != 32 ||
+                framebuffer_var_.xres < static_cast<unsigned>(kWidth) ||
+                framebuffer_var_.yres < static_cast<unsigned>(kHeight)) {
+                throw std::runtime_error("unsupported configured framebuffer format");
+            }
+            framebuffer_map_ = static_cast<std::uint8_t*>(mmap(
+                nullptr, framebuffer_fix_.smem_len, PROT_READ | PROT_WRITE,
+                MAP_SHARED, framebuffer_fd_, 0));
+            if (framebuffer_map_ == MAP_FAILED) {
+                framebuffer_map_ = nullptr;
+                throw std::runtime_error("cannot map configured framebuffer");
+            }
+            framebuffer_pixels_.resize(static_cast<std::size_t>(kWidth) *
+                                       static_cast<std::size_t>(kHeight) * 4U);
+            direct_framebuffer_output_ = true;
+            std::cerr << "dmr_b210_gui: direct framebuffer=" << framebuffer_path << '\n';
+            open_touch_input();
+        }
+#endif
         font_ = TTF_OpenFont(config_.font_path.c_str(), 16);
         if (!font_) throw std::runtime_error("cannot open configured Chinese font");
         font_small_ = TTF_OpenFont(config_.font_path.c_str(), 13);
@@ -617,6 +771,20 @@ private:
 
     void shutdown_sdl()
     {
+#if defined(__linux__)
+        if (framebuffer_map_) {
+            munmap(framebuffer_map_, framebuffer_fix_.smem_len);
+            framebuffer_map_ = nullptr;
+        }
+        if (framebuffer_fd_ >= 0) {
+            ::close(framebuffer_fd_);
+            framebuffer_fd_ = -1;
+        }
+        if (touch_fd_ >= 0) {
+            ::close(touch_fd_);
+            touch_fd_ = -1;
+        }
+#endif
         if (font_bold_) TTF_CloseFont(font_bold_);
         if (font_small_) TTF_CloseFont(font_small_);
         if (font_) TTF_CloseFont(font_);
@@ -687,6 +855,7 @@ private:
             }
         }
         refresh_due_channels();
+        refresh_pending_calibration_exit();
         const auto now = std::chrono::steady_clock::now();
         const bool stale = state_.last_update.time_since_epoch().count() == 0 ||
             now - state_.last_update > std::chrono::seconds(1);
@@ -702,7 +871,20 @@ private:
 
     void update_runtime(const std::string& object)
     {
-        if (const auto profile = json_string(object, "active_channel_profile_id")) state_.active_profile = *profile;
+        if (const auto profile = json_string(object, "active_channel_profile_id")) {
+            const bool changed = *profile != state_.active_profile;
+            state_.active_profile = *profile;
+            if (changed &&
+                (state_.active_channel.id != *profile ||
+                 channels_.find(*profile) == channels_.end())) {
+                if (state_.online) {
+                    request_channel_refresh(*profile);
+                } else {
+                    channel_refresh_due_[*profile] =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+                }
+            }
+        }
         if (const auto count = json_number<int>(object, "configured_channel_profile_count")) state_.configured_profiles = *count;
         if (const auto bytes = json_number<std::uint64_t>(object, "recording_storage_bytes")) {
             state_.recording_storage_bytes = *bytes;
@@ -712,6 +894,7 @@ private:
         }
         if (const auto forwarding = json_bool(object, "forwarding_enabled")) state_.forwarding_enabled = *forwarding;
         if (const auto running = json_bool(object, "rf_running")) state_.rf_running = *running;
+        if (const auto fault = json_bool(object, "rf_fault")) state_.rf_fault = *fault;
         if (const auto error = json_string(object, "last_error")) state_.last_error = *error;
         if (const auto version = json_string(object, "repeater_version")) {
             state_.repeater_version = *version;
@@ -721,7 +904,14 @@ private:
         }
         const std::string gain = json_object(object, "gain_control");
         if (!gain.empty()) {
-            if (const auto mode = json_string(gain, "mode")) state_.gain_mode = *mode;
+            if (const auto mode = json_string(gain, "active_mode")) {
+                state_.gain_mode = *mode;
+            } else if (const auto mode = json_string(gain, "mode")) {
+                state_.gain_mode = *mode;
+            }
+            if (const auto selection = json_string(gain, "selection_mode")) {
+                state_.gain_selection_mode = *selection;
+            }
         }
     }
 
@@ -811,8 +1001,8 @@ private:
             const int rx_channel = json_number<int>(curve, "rx_channel").value_or(-1);
             const std::string band = json_string(curve, "band").value_or("");
             if (rx_channel < 0 || rx_channel > 1 ||
-                (band != "strong" && band != "weak")) continue;
-            const int column = rx_channel * 2 + (band == "weak" ? 1 : 0);
+                (band != "low" && band != "high")) continue;
+            const int column = rx_channel * 2 + (band == "high" ? 1 : 0);
             calibration_.column_gain[static_cast<std::size_t>(column)] =
                 json_number<int>(curve, "rx_gain_tenths_db");
             calibration_.column_points[static_cast<std::size_t>(column)].clear();
@@ -828,7 +1018,7 @@ private:
         }
         const std::string session_points = json_array(object, "points");
         const int session_column = calibration_.rx_channel * 2 +
-            (calibration_.band == "weak" ? 1 : 0);
+            (calibration_.band == "high" ? 1 : 0);
         if (session_column >= 0 && session_column < 4 && !session_points.empty()) {
             auto& points = calibration_.column_points[static_cast<std::size_t>(session_column)];
             for (const std::string& point : json_array_objects(session_points)) {
@@ -843,6 +1033,9 @@ private:
     void update_response(const std::string& frame)
     {
         const std::string request_id = json_string(frame, "request_id").value_or("");
+        const bool silent_calibration_query = calibration_query_request_ &&
+            *calibration_query_request_ == request_id;
+        if (silent_calibration_query) calibration_query_request_.reset();
         const auto channel_request = channel_requests_.find(request_id);
         const std::string requested_profile = channel_request == channel_requests_.end() ? "" :
             channel_request->second;
@@ -853,8 +1046,10 @@ private:
         const bool ok = json_bool(frame, "ok").value_or(false);
         const std::string code = json_string(frame, "code").value_or("错误");
         const std::string message = json_string(frame, "message").value_or("");
-        if (ok) add_event(action + "：" + (message.empty() ? code : message), kGreen);
-        else add_event(action + "失败：" + (message.empty() ? code : message), kRed);
+        if (!silent_calibration_query) {
+            if (ok) add_event(action + "：" + (message.empty() ? code : message), kGreen);
+            else add_event(action + "失败：" + (message.empty() ? code : message), kRed);
+        }
         const std::string state = json_object(frame, "state");
         if (!state.empty()) {
             update_calibration_state(state);
@@ -864,14 +1059,11 @@ private:
                 calibration_.session_id = json_string(state, "session_id").value_or("");
                 calibration_.band = json_string(state, "band").value_or(calibration_.band);
                 calibration_.rx_channel = json_number<int>(state, "rx_channel").value_or(calibration_.rx_channel);
+                calibration_.selected_column = calibration_.rx_channel * 2 +
+                    (calibration_.band == "high" ? 1 : 0);
                 calibration_.next_input_dbm = json_number<int>(state, "next_input_dbm").value_or(0);
                 calibration_.completed_points = json_number<int>(state, "completed_points").value_or(0);
                 calibration_.gain_tenths_db = json_number<int>(state, "rx_gain_tenths_db").value_or(0);
-                if (state.find("\"next_input_dbm\":null") != std::string::npos) {
-                    calibration_.selected_input_dbm.reset();
-                } else {
-                    calibration_.selected_input_dbm = calibration_.next_input_dbm;
-                }
             }
             if (request_id.find("channel") != std::string::npos ||
                 state.find("\"dmr_rx\"") != std::string::npos) {
@@ -880,13 +1072,18 @@ private:
             }
             update_runtime(state);
         }
-        if (action == "CAL begin" || action == "CAL step" ||
-            action == "CAL commit" || action == "CAL cancel" ||
+        if (calibration_exit_after_save_ && calibration_.state == "committed" &&
+            calibration_.session_id.empty()) {
+            finish_calibration_exit();
+        } else if (calibration_exit_after_discard_ &&
+                   (calibration_.state == "cancelled" || calibration_.state == "idle") &&
+                   calibration_.session_id.empty()) {
+            finish_calibration_exit();
+        }
+        if (action == "CAL begin" || action == "CAL submit" ||
+            action == "CAL save" || action == "CAL cancel" ||
             action == "CAL gain" || action == "CAL auto") {
-            try {
-                track(client_.send("get_rx_calibration"), "CAL query");
-            } catch (...) {
-            }
+            request_calibration_refresh();
         }
     }
 
@@ -1006,26 +1203,34 @@ private:
                           "   |   TX " + frequency_text(state_.active_channel.tx_frequency_hz),
                           28, 110, kMuted, {28, 106, 430, 24}, font_small_);
         draw_box({28, 134, 430, 1}, kLine);
-        for (std::size_t index = 0; index < std::min<std::size_t>(3, config_.profile_ids.size()); ++index) {
+        for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
+            const std::string profile_id = quick_profile_ids_[index];
             const int x = 28 + static_cast<int>(index) * 134;
-            add_button({x, 144, 133, 28}, config_.profile_ids[index],
-                config_.profile_ids[index] == state_.active_profile ? kCyan : kDark,
-                [this, index] { request_switch(config_.profile_ids[index]); }, controls_enabled());
+            add_button({x, 144, 133, 28}, channel_label(profile_id),
+                profile_id == state_.active_profile ? kCyan : kDark,
+                [this, profile_id] { request_switch(profile_id); }, controls_enabled());
         }
         draw_text_vcentered_clipped("转发控制", 28, kMuted, {28, 175, 229, 19},
                                     font_small_);
-        draw_text_vcentered_clipped("增益：" + state_.gain_mode, 368, kMuted,
-                                    {368, 175, 88, 19}, font_small_);
+        draw_text_vcentered_clipped("增益：" + gain_mode_label(), 334, kMuted,
+                                    {334, 175, 130, 19}, font_small_);
         const SDL_Rect forwarding_state_box{28, 198, 229, 35};
-        draw_box(forwarding_state_box, state_.forwarding_enabled ? kGreen : kDark);
+        draw_box(forwarding_state_box, state_.rf_fault ? kRed :
+                 (state_.forwarding_enabled ? kGreen : kDark));
+        const std::string forwarding_state_label = state_.rf_fault ? "射频故障" :
+            (state_.forwarding_enabled ? "● 转发运行中" : "○ 转发待机");
+        const std::string forwarding_control_label = state_.rf_fault ? "复位射频" :
+            (state_.forwarding_enabled ? "停止转发" : "启动转发");
         draw_text_vcentered_clipped(
-            state_.forwarding_enabled ? "● 转发运行中" : "○ 转发待机", 44,
-            state_.forwarding_enabled ? kBackground : kText,
+            forwarding_state_label, 44,
+            state_.forwarding_enabled && !state_.rf_fault ? kBackground : kText,
             {40, forwarding_state_box.y, 205, forwarding_state_box.h}, font_);
-        add_button({267, 198, 126, 35}, state_.forwarding_enabled ? "停止转发" : "启动转发",
-                   state_.forwarding_enabled ? kDark : kGreen, [this] {
-            send_control(state_.forwarding_enabled ? "stop_forwarding" : "start_forwarding", {},
-                         state_.forwarding_enabled ? "停止转发" : "启动转发");
+        add_button({267, 198, 126, 35}, forwarding_control_label,
+                   state_.rf_fault ? kRed : (state_.forwarding_enabled ? kDark : kGreen), [this] {
+            const bool reset_fault = state_.rf_fault;
+            send_control(reset_fault || state_.forwarding_enabled ? "stop_forwarding" : "start_forwarding", {},
+                         reset_fault ? "复位射频" :
+                         (state_.forwarding_enabled ? "停止转发" : "启动转发"));
         }, controls_enabled());
 
         draw_box({490, 44, 298, 200});
@@ -1067,7 +1272,7 @@ private:
 
         draw_text("系统", 556, 270, kMuted, font_small_);
         draw_text("增益", 556, 302, kMuted, font_small_);
-        draw_text_clipped(state_.gain_mode, 608, 302, kText, {608, 300, 58, 20}, font_small_);
+        draw_text_clipped(gain_mode_label(), 608, 302, kText, {608, 300, 62, 20}, font_small_);
         draw_text("AFM", 676, 302, kMuted, font_small_);
         draw_text(state_.active_channel.fm_enabled ? "启用" : "关闭", 724, 302,
                   state_.active_channel.fm_enabled ? kGreen : kMuted, font_small_);
@@ -1112,6 +1317,16 @@ private:
         if (mode == "dmr") return "DMR";
         if (mode == "fm") return "FM";
         return mode;
+    }
+
+    std::string gain_mode_label() const
+    {
+        const std::string selection = state_.gain_selection_mode == "auto"
+            ? "自动"
+            : "手动";
+        if (state_.gain_mode == "high") return selection + "/高";
+        if (state_.gain_mode == "low") return selection + "/低";
+        return selection + "/自定义";
     }
 
     void draw_meter(int x, int y, int receiver)
@@ -1198,19 +1413,24 @@ private:
             const int x = column == 0 ? 26 : 410;
             const int y = 116 + row * 66;
             const bool active = profile_id == state_.active_profile;
-            add_button({x, y, 356, 54}, "", active ? kCyan : kPanel,
+            const bool quick = is_quick_profile(profile_id);
+            add_button({x, y + 11, 32, 32}, quick ? "✓" : "",
+                       quick ? kGreen : kDark,
+                       [this, profile_id] { toggle_quick_profile(profile_id); },
+                       controls_enabled());
+            add_button({x + 42, y, 314, 54}, "", active ? kCyan : kPanel,
                        [this, profile_id] { open_channel_details(profile_id); }, controls_enabled());
-            draw_text(channel_label(profile_id), x + 14, y + 10, active ? kBackground : kText, font_bold_);
+            draw_text(channel_label(profile_id), x + 56, y + 10, active ? kBackground : kText, font_bold_);
             const auto found = channels_.find(profile_id);
             if (found == channels_.end()) {
-                draw_text("RX / TX 读取中", x + 84, y + 18, kMuted, font_small_);
+                draw_text("RX / TX 读取中", x + 126, y + 18, kMuted, font_small_);
             } else {
                 draw_text_clipped("RX " + frequency_text(found->second.rx_frequency_hz) + "  |  TX " +
-                                  frequency_text(found->second.tx_frequency_hz),
-                                  x + 84, y + 18, active ? kBackground : kMuted,
-                                  {x + 84, y + 14, 254, 28}, font_small_);
+                                   frequency_text(found->second.tx_frequency_hz),
+                                  x + 126, y + 18, active ? kBackground : kMuted,
+                                  {x + 126, y + 14, 216, 28}, font_small_);
             }
-            if (active) draw_text("当前", x + 14, y + 34, kBackground, font_small_);
+            if (active) draw_text("当前", x + 56, y + 34, kBackground, font_small_);
         }
     }
 
@@ -1227,6 +1447,28 @@ private:
         const auto found = std::find(config_.profile_ids.begin(), config_.profile_ids.end(), profile_id);
         if (found == config_.profile_ids.end()) return profile_id;
         return "CH" + std::to_string(std::distance(config_.profile_ids.begin(), found) + 1);
+    }
+
+    bool is_quick_profile(const std::string& profile_id) const
+    {
+        return std::find(quick_profile_ids_.begin(), quick_profile_ids_.end(), profile_id) !=
+            quick_profile_ids_.end();
+    }
+
+    void toggle_quick_profile(const std::string& profile_id)
+    {
+        const auto found = std::find(quick_profile_ids_.begin(), quick_profile_ids_.end(), profile_id);
+        if (found != quick_profile_ids_.end()) {
+            quick_profile_ids_.erase(found);
+            add_event(channel_label(profile_id) + " 已移出快速信道", kAmber);
+            return;
+        }
+        if (quick_profile_ids_.size() >= 3U) {
+            add_event("快速信道最多选择 3 个", kRed);
+            return;
+        }
+        quick_profile_ids_.push_back(profile_id);
+        add_event(channel_label(profile_id) + " 已加入快速信道", kGreen);
     }
 
     Channel selected_channel() const
@@ -1389,10 +1631,13 @@ private:
                    [this, profile_id] { request_switch(profile_id); }, controls_enabled());
         add_button({568, 306, 188, 34}, "设为开机信道", kDark,
                    [this, profile_id] { request_switch(profile_id, true); }, controls_enabled());
-        add_button({202, 366, 180, 34}, "高档", state_.gain_mode == "high" ? kCyan : kDark,
+        add_button({92, 366, 150, 34}, "自动", state_.gain_selection_mode == "auto" ? kCyan : kDark,
+                   [this] { send_control("set_gain_mode", "\"gain_mode\":\"auto\"", "启用自动增益"); },
+                   controls_enabled() && editing_active);
+        add_button({252, 366, 150, 34}, "高档", state_.gain_selection_mode == "manual" && state_.gain_mode == "high" ? kCyan : kDark,
                    [this] { send_control("set_gain_mode", "\"gain_mode\":\"high\"", "切换高增益"); },
                    controls_enabled() && editing_active);
-        add_button({418, 366, 180, 34}, "低档", state_.gain_mode == "low" ? kCyan : kDark,
+        add_button({412, 366, 150, 34}, "低档", state_.gain_selection_mode == "manual" && state_.gain_mode == "low" ? kCyan : kDark,
                    [this] { send_control("set_gain_mode", "\"gain_mode\":\"low\"", "切换低增益"); },
                    controls_enabled() && editing_active);
     }
@@ -1417,32 +1662,22 @@ private:
         stage_channel_value(profile_id, key, value);
     }
 
-    void begin_rx_calibration()
-    {
-        send_control("rx_calibration_begin",
-                     "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
-                         ",\"calibration_band\":\"" + calibration_.band + "\"",
-                     "CAL begin");
-    }
-
     void step_rx_calibration()
     {
         if (calibration_.session_id.empty()) return;
         send_control("rx_calibration_step",
-                     "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
-                         ",\"calibration_band\":\"" + calibration_.band +
-                         "\",\"session_id\":\"" + calibration_.session_id +
-                         "\",\"input_dbm\":" + std::to_string(calibration_.next_input_dbm) +
-                         ",\"rx_gain_tenths_db\":" + std::to_string(calibration_.gain_tenths_db),
-                     "CAL step");
+                     "\"session_id\":\"" + calibration_.session_id +
+                         "\",\"input_dbm\":" +
+                         std::to_string(calibration_.next_input_dbm),
+                     "CAL submit");
     }
 
-    void commit_rx_calibration()
+    void save_rx_calibration()
     {
         if (calibration_.session_id.empty()) return;
         send_control("rx_calibration_commit",
                      "\"session_id\":\"" + calibration_.session_id + "\"",
-                     "CAL commit");
+                     "CAL save");
     }
 
     void cancel_rx_calibration()
@@ -1456,9 +1691,85 @@ private:
     void open_calibration_page()
     {
         page_ = 4;
+        calibration_leave_dialog_ = false;
+        calibration_exit_after_save_ = false;
+        calibration_exit_after_discard_ = false;
         calibration_.authorized = false;
         calibration_.password_input.clear();
         calibration_.password_error.clear();
+    }
+
+    bool calibration_has_unsaved_work() const
+    {
+        if (!calibration_.session_id.empty()) return true;
+        return std::any_of(pending_.begin(), pending_.end(), [](const auto& item) {
+            return item.second.rfind("CAL ", 0) == 0;
+        });
+    }
+
+    void finish_calibration_exit()
+    {
+        calibration_leave_dialog_ = false;
+        calibration_exit_after_save_ = false;
+        calibration_exit_after_discard_ = false;
+        calibration_.authorized = false;
+        calibration_.password_input.clear();
+        calibration_.password_error.clear();
+        page_ = calibration_exit_target_page_;
+    }
+
+    void request_calibration_exit(int target_page = 3)
+    {
+        calibration_exit_target_page_ = target_page;
+        if (!calibration_has_unsaved_work()) {
+            finish_calibration_exit();
+            return;
+        }
+        calibration_leave_dialog_ = true;
+    }
+
+    void discard_calibration_and_exit()
+    {
+        if (!calibration_has_unsaved_work()) {
+            finish_calibration_exit();
+            return;
+        }
+        calibration_leave_dialog_ = false;
+        calibration_exit_after_discard_ = true;
+        cancel_rx_calibration();
+    }
+
+    void save_calibration_and_exit()
+    {
+        if (calibration_.completed_points != 9 || calibration_.session_id.empty()) {
+            return;
+        }
+        calibration_leave_dialog_ = false;
+        calibration_exit_after_save_ = true;
+        save_rx_calibration();
+    }
+
+    void request_calibration_refresh()
+    {
+        if (calibration_query_request_) return;
+        try {
+            calibration_query_request_ = client_.send("get_rx_calibration");
+        } catch (...) {
+        }
+    }
+
+    void refresh_pending_calibration_exit()
+    {
+        if (!calibration_exit_after_save_ && !calibration_exit_after_discard_) {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_calibration_query_) {
+            // A lost UDP reply must not leave save/discard exit waiting forever.
+            calibration_query_request_.reset();
+            request_calibration_refresh();
+            next_calibration_query_ = now + std::chrono::milliseconds(150);
+        }
     }
 
     void select_calibration_column(int column)
@@ -1466,26 +1777,28 @@ private:
         if (column < 0 || column >= 4) return;
         calibration_.selected_column = column;
         calibration_.rx_channel = column / 2;
-        calibration_.band = column % 2 == 0 ? "strong" : "weak";
-        calibration_.selected_input_dbm.reset();
+        calibration_.band = column % 2 == 0 ? "low" : "high";
     }
 
     void set_calibration_gain(int delta_tenths_db)
     {
+        if (calibration_.band == "low") {
+            calibration_.gain_tenths_db = 0;
+            return;
+        }
         const int column = calibration_.selected_column;
         const int current = calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
             calibration_.gain_tenths_db);
         const int next = std::clamp(current + delta_tenths_db, 0, 1000);
-        send_control("set_rx_gain",
-                     "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
-                         ",\"calibration_band\":\"" + calibration_.band +
-                         "\",\"rx_gain_tenths_db\":" + std::to_string(next),
-                     "CAL gain");
         calibration_.gain_tenths_db = next;
     }
 
     void auto_calibration_gain()
     {
+        if (calibration_.band == "low") {
+            calibration_.gain_tenths_db = 0;
+            return;
+        }
         const Receiver& receiver = state_.receivers[static_cast<std::size_t>(calibration_.rx_channel)];
         if (!receiver.rssi_valid) {
             add_event("CAL auto: RSSI unavailable", kRed);
@@ -1495,11 +1808,6 @@ private:
             .value_or(calibration_.gain_tenths_db);
         const int next = std::clamp(current + static_cast<int>(std::lround((-20.0 - receiver.rssi_dbfs) * 10.0)),
                                     0, 1000);
-        send_control("set_rx_gain",
-                     "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
-                         ",\"calibration_band\":\"" + calibration_.band +
-                         "\",\"rx_gain_tenths_db\":" + std::to_string(next),
-                     "CAL auto");
         calibration_.gain_tenths_db = next;
     }
 
@@ -1528,11 +1836,9 @@ private:
     void begin_selected_calibration()
     {
         std::string fields = "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
-            ",\"calibration_band\":\"" + calibration_.band + "\"";
-        if (calibration_.selected_input_dbm) {
-            fields += ",\"start_input_dbm\":" +
-                std::to_string(*calibration_.selected_input_dbm);
-        }
+            ",\"calibration_band\":\"" + calibration_.band + "\"" +
+            ",\"rx_gain_tenths_db\":" + std::to_string(
+                calibration_.band == "low" ? 0 : calibration_.gain_tenths_db);
         send_control("rx_calibration_begin", fields, "CAL begin");
     }
 
@@ -1634,6 +1940,8 @@ private:
     {
         draw_box({12, 46, 776, 382});
         draw_text("RSSI校准", 28, 62, kText, font_bold_);
+        add_button({646, 54, 126, 28}, "返回状态", kDark,
+                   [this] { request_calibration_exit(3); });
         draw_text("请输入8位校准密码", 28, 96, kMuted, font_);
         draw_box({28, 124, 310, 38}, kDark);
         const std::string masked(calibration_.password_input.size(), '*');
@@ -1656,14 +1964,72 @@ private:
                                (index == 10 ? 0 : index + 1)));
                        }, controls_enabled());
         }
-        add_button({28, 382, 128, 32}, "返回状态", kDark,
-                   [this] { page_ = 3; });
     }
 
-    std::string calibration_column_label(int column) const
+    void draw_calibration_table(const std::string& band,
+                                const std::array<int, 9>& inputs, int x)
     {
-        const int rx = column / 2 + 1;
-        return "RX" + std::to_string(rx) + (column % 2 == 0 ? " 高档" : " 低档");
+        constexpr int table_y = 188;
+        constexpr int table_width = 356;
+        constexpr int table_height = 216;
+        constexpr int first_value_x_offset = 66;
+        constexpr int value_width = 140;
+        const bool high = band == "high";
+        const bool session_active = calibration_.state == "active" &&
+            !calibration_.session_id.empty() && calibration_.band == band;
+
+        draw_box({x, table_y, table_width, table_height}, kPanel);
+        draw_text_vcentered_clipped(high ? "高增益校准" : "低增益校准", x + 10,
+                                    high ? kAmber : kCyan,
+                                    {x + 10, table_y + 5, 120, 20}, font_bold_);
+        draw_text_vcentered_clipped(high ? "-60 至 -140 dBm" : "+10 至 -70 dBm",
+                                    x + 136, kMuted,
+                                    {x + 136, table_y + 7, 188, 18}, font_small_);
+        draw_text_vcentered_clipped("dBm", x + 12, kMuted,
+                                    {x + 12, table_y + 29, 46, 18}, font_small_);
+
+        for (int rx = 0; rx < 2; ++rx) {
+            const int column = rx * 2 + (high ? 1 : 0);
+            const int value_x = x + first_value_x_offset + rx * value_width;
+            const int gain = high
+                ? calibration_.column_gain[static_cast<std::size_t>(column)].value_or(0)
+                : 0;
+            draw_text_vcentered_clipped(
+                "RX" + std::to_string(rx + 1) + " " + gain_text(gain), value_x,
+                kMuted, {value_x, table_y + 29, value_width - 4, 18}, font_small_);
+        }
+
+        for (std::size_t row = 0; row < inputs.size(); ++row) {
+            const int input = inputs[row];
+            const int row_y = table_y + 50 + static_cast<int>(row) * 17;
+            draw_text_vcentered_clipped(std::to_string(input), x + 12, kText,
+                                        {x + 12, row_y, 46, 16}, font_small_);
+            for (int rx = 0; rx < 2; ++rx) {
+                const int column = rx * 2 + (high ? 1 : 0);
+                const int value_x = x + first_value_x_offset + rx * value_width;
+                const bool current_point = session_active &&
+                    calibration_.rx_channel == rx &&
+                    calibration_.next_input_dbm == input;
+                draw_box({value_x, row_y, value_width - 4, 16},
+                         current_point ? kCyan : kDark);
+                const auto found = calibration_.column_points[
+                    static_cast<std::size_t>(column)].find(input);
+                std::string value = current_point ? "待测" : "--";
+                if (!current_point && found != calibration_.column_points[
+                                          static_cast<std::size_t>(column)].end()) {
+                    std::ostringstream measured;
+                    measured << std::fixed << std::setprecision(1) << found->second.first;
+                    value = measured.str();
+                }
+                draw_text_vcentered_clipped(value, value_x + 5,
+                                            current_point ? kBackground :
+                                            found == calibration_.column_points[
+                                                static_cast<std::size_t>(column)].end()
+                                                ? kMuted : kCyan,
+                                            {value_x + 5, row_y, value_width - 12, 16},
+                                            font_small_);
+            }
+        }
     }
 
     void draw_calibration_page()
@@ -1674,6 +2040,8 @@ private:
         }
         draw_box({12, 46, 776, 382});
         draw_text("RSSI校准", 24, 58, kText, font_bold_);
+        add_button({646, 54, 126, 28}, "返回状态", kDark,
+                   [this] { request_calibration_exit(3); }, controls_enabled());
         draw_text("当前输入", 24, 86, kMuted, font_small_);
         const Receiver& receiver = state_.receivers[static_cast<std::size_t>(calibration_.rx_channel)];
         std::ostringstream live;
@@ -1687,29 +2055,37 @@ private:
                    [this] { select_calibration_column(calibration_.selected_column % 2); }, controls_enabled());
         add_button({108, 112, 76, 30}, "RX2", calibration_.rx_channel == 1 ? kCyan : kDark,
                    [this] { select_calibration_column(2 + calibration_.selected_column % 2); }, controls_enabled());
-        add_button({196, 112, 76, 30}, "高档", calibration_.band == "strong" ? kCyan : kDark,
+        add_button({196, 112, 76, 30}, "低档", calibration_.band == "low" ? kCyan : kDark,
                    [this] { select_calibration_column(calibration_.rx_channel * 2); }, controls_enabled());
-        add_button({280, 112, 76, 30}, "低档", calibration_.band == "weak" ? kCyan : kDark,
+        add_button({280, 112, 76, 30}, "高档", calibration_.band == "high" ? kCyan : kDark,
                    [this] { select_calibration_column(calibration_.rx_channel * 2 + 1); }, controls_enabled());
         const int column = calibration_.selected_column;
-        const int gain = calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
-            calibration_.gain_tenths_db);
+        const int gain = calibration_.band == "low" ? 0 :
+            calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
+                calibration_.gain_tenths_db);
         draw_text("RX GAIN", 386, 86, kMuted, font_small_);
         draw_text(gain_text(gain), 464, 86, kCyan, font_bold_);
         add_button({386, 112, 68, 30}, "自动", kDark,
-                   [this] { auto_calibration_gain(); }, controls_enabled());
+                   [this] { auto_calibration_gain(); },
+                   controls_enabled() && calibration_.band == "high");
         add_button({462, 112, 46, 30}, "-", kDark,
-                   [this] { set_calibration_gain(-10); }, controls_enabled());
+                   [this] { set_calibration_gain(-10); },
+                   controls_enabled() && calibration_.band == "high");
         add_button({514, 112, 46, 30}, "+", kDark,
-                   [this] { set_calibration_gain(10); }, controls_enabled());
-        draw_text_clipped("每列增益 " + gain_text(gain), 572, 116, kMuted,
+                   [this] { set_calibration_gain(10); },
+                   controls_enabled() && calibration_.band == "high");
+        draw_text_clipped(calibration_.band == "low" ? "低档固定 0.0 dB" :
+                          "高档会话增益 " + gain_text(gain), 572, 116, kMuted,
                           {572, 112, 198, 30}, font_small_);
         add_button({24, 150, 90, 30}, "开始", kGreen,
                    [this] { begin_selected_calibration(); }, controls_enabled());
-        add_button({120, 150, 90, 30}, "测量", calibration_.state == "active" ? kAmber : kDark,
+        add_button({120, 150, 90, 30}, "提交", calibration_.state == "active" ? kGreen : kDark,
                    [this] { step_rx_calibration(); }, controls_enabled());
-        add_button({216, 150, 90, 30}, "提交", calibration_.state == "active" ? kGreen : kDark,
-                   [this] { commit_rx_calibration(); }, controls_enabled());
+        add_button({216, 150, 90, 30}, "保存",
+                   calibration_.completed_points == 9 ? kGreen : kDark,
+                   [this] { save_rx_calibration(); },
+                   controls_enabled() && calibration_.completed_points == 9 &&
+                       !calibration_.session_id.empty());
         add_button({312, 150, 90, 30}, "取消", kDark,
                    [this] { cancel_rx_calibration(); }, controls_enabled());
         std::ostringstream status;
@@ -1717,51 +2093,29 @@ private:
                << "点  下一个 " << calibration_.next_input_dbm << " dBm";
         draw_text_clipped(status.str(), 416, 154, kMuted, {416, 150, 350, 30}, font_small_);
 
-        draw_box({24, 188, 728, 224});
-        draw_text_vcentered_clipped("dBm", 34, kMuted, {34, 194, 45, 40}, font_small_);
-        for (int index = 0; index < 4; ++index) {
-            const int x = 88 + index * 162;
-            draw_text_vcentered_clipped(calibration_column_label(index), x, kText,
-                                        {x, 192, 150, 23}, font_small_);
-            draw_text_vcentered_clipped(
-                "G " + gain_text(calibration_.column_gain[static_cast<std::size_t>(index)].value_or(0)),
-                x, kMuted, {x, 215, 150, 23}, font_small_);
-        }
-        constexpr int visible_rows = 8;
-        const int max_scroll = static_cast<int>(kCalibrationInputDbm.size()) - visible_rows;
-        calibration_.scroll_row = std::clamp(calibration_.scroll_row, 0, std::max(0, max_scroll));
-        for (int row = 0; row < visible_rows; ++row) {
-            const int input_index = calibration_.scroll_row + row;
-            if (input_index >= static_cast<int>(kCalibrationInputDbm.size())) break;
-            const int input = kCalibrationInputDbm[static_cast<std::size_t>(input_index)];
-            const int y = 241 + row * 21;
-            const bool selected = calibration_.selected_input_dbm &&
-                *calibration_.selected_input_dbm == input;
-            add_button({28, y, 720, 20}, "", selected ? kCyan : kPanel,
-                       [this, input] { calibration_.selected_input_dbm = input; }, controls_enabled());
-            draw_text(std::to_string(input), 34, y + 2, selected ? kBackground : kText, font_small_);
-            for (int index = 0; index < 4; ++index) {
-                const auto found = calibration_.column_points[static_cast<std::size_t>(index)].find(input);
-                const int x = 88 + index * 162;
-                if (found == calibration_.column_points[static_cast<std::size_t>(index)].end()) {
-                    draw_text("--", x, y + 2, kMuted, font_small_);
-                } else {
-                    std::ostringstream value;
-                    value << std::fixed << std::setprecision(1) << found->second.first;
-                    draw_text(value.str(), x, y + 2, selected ? kBackground : kCyan, font_small_);
-                }
-            }
-        }
-        calibration_scroll_track_ = {756, 236, 20, 165};
-        draw_box(*calibration_scroll_track_, kDark);
-        const int thumb_height = 28;
-        const int thumb_y = calibration_scroll_track_->y +
-            (max_scroll == 0 ? 0 : calibration_.scroll_row *
-             (calibration_scroll_track_->h - thumb_height) / max_scroll);
-        draw_box({calibration_scroll_track_->x, thumb_y,
-                  calibration_scroll_track_->w, thumb_height}, kCyan);
-        add_button({24, 416, 128, 12}, "返回状态", kDark,
-                   [this] { page_ = 3; }, controls_enabled());
+        draw_calibration_table("low", kLowCalibrationInputDbm, 24);
+        draw_calibration_table("high", kHighCalibrationInputDbm, 396);
+    }
+
+    void draw_calibration_leave_dialog()
+    {
+        draw_box({88, 148, 624, 188}, kPanel);
+        draw_text("校准尚未保存", 112, 168, kAmber, font_bold_);
+        draw_text_clipped("当前校准会话已有数据，离开前请选择保存或放弃。",
+                          112, 204, kText, {112, 200, 560, 26}, font_small_);
+        draw_text_clipped(calibration_.completed_points == 9
+                              ? "保存后会写入转发配置文件。"
+                              : "未完成 9 个校准点时只能放弃或继续校准。",
+                          112, 230, kMuted, {112, 226, 560, 24}, font_small_);
+        add_button({116, 278, 150, 38}, "继续校准", kDark,
+                   [this] { calibration_leave_dialog_ = false; }, true);
+        add_button({324, 278, 150, 38}, "放弃返回", kRed,
+                   [this] { discard_calibration_and_exit(); }, controls_enabled());
+        add_button({532, 278, 150, 38}, "保存返回",
+                   calibration_.completed_points == 9 ? kGreen : kDark,
+                   [this] { save_calibration_and_exit(); },
+                   controls_enabled() && calibration_.completed_points == 9 &&
+                       !calibration_.session_id.empty());
     }
 
     std::string call_mode_text(const std::string& mode) const
@@ -1775,22 +2129,25 @@ private:
 
     void draw_navigation()
     {
-        constexpr std::array<const char*, 5> labels{{"主页", "信道", "参数", "状态", "校准"}};
-        for (int index = 0; index < 5; ++index) {
-            add_button({index * 160, 440, 160, 40}, labels[static_cast<std::size_t>(index)],
+        constexpr std::array<const char*, 4> labels{{"主页", "信道", "参数", "状态"}};
+        const bool navigation_enabled = page_ != 4 || pending_.empty();
+        for (int index = 0; index < 4; ++index) {
+            add_button({index * 200, 440, 200, 40}, labels[static_cast<std::size_t>(index)],
                        page_ == index || (index == 3 && page_ == 4) ? kCyan : kDark, [this, index] {
+                if (page_ == 4) {
+                    request_calibration_exit(index);
+                    return;
+                }
                 page_ = index;
                 if (index == 1) request_channel_summaries();
                 if (index == 2 && detail_profile_id_.empty()) detail_profile_id_ = state_.active_profile;
-                if (index == 4) open_calibration_page();
-            });
+            }, navigation_enabled);
         }
     }
 
     void draw()
     {
         hits_.clear();
-        calibration_scroll_track_.reset();
         SDL_SetRenderTarget(renderer_, canvas_);
         SDL_SetRenderDrawColor(renderer_, kBackground.r, kBackground.g, kBackground.b, kBackground.a);
         SDL_RenderClear(renderer_);
@@ -1804,6 +2161,28 @@ private:
         default: draw_home(); break;
         }
         draw_navigation();
+        if (calibration_leave_dialog_) {
+            calibration_dialog_hit_begin_ = hits_.size();
+            draw_calibration_leave_dialog();
+        } else {
+            calibration_dialog_hit_begin_ = hits_.size();
+        }
+        if (direct_framebuffer_output_) {
+#if defined(__linux__)
+            if (SDL_RenderReadPixels(renderer_, nullptr, SDL_PIXELFORMAT_ARGB8888,
+                                     framebuffer_pixels_.data(), kWidth * 4) != 0) {
+                throw std::runtime_error("cannot read rendered GUI pixels");
+            }
+            for (int y = 0; y < kHeight; ++y) {
+                std::memcpy(framebuffer_map_ + static_cast<std::size_t>(y) *
+                                framebuffer_fix_.line_length,
+                            framebuffer_pixels_.data() + static_cast<std::size_t>(y) *
+                                kWidth * 4U,
+                            static_cast<std::size_t>(kWidth) * 4U);
+            }
+#endif
+            return;
+        }
         SDL_SetRenderTarget(renderer_, nullptr);
         SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
         SDL_RenderClear(renderer_);
@@ -1838,6 +2217,80 @@ private:
         return {static_cast<int>(x * kWidth / width), static_cast<int>(y * kHeight / height)};
     }
 
+#if defined(__linux__)
+    void open_touch_input()
+    {
+        for (int index = 0; index < 32; ++index) {
+            const std::string path = "/dev/input/event" + std::to_string(index);
+            const int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+            if (fd < 0) continue;
+            char name[256]{};
+            if (ioctl(fd, EVIOCGNAME(sizeof(name)), name) >= 0 &&
+                (std::string(name).find("ft5x06") != std::string::npos ||
+                 std::string(name).find("ft5506") != std::string::npos ||
+                 std::string(name).find("edt-ft") != std::string::npos)) {
+                touch_fd_ = fd;
+                input_absinfo x_info{};
+                input_absinfo y_info{};
+                if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &x_info) == 0) {
+                    touch_x_min_ = x_info.minimum;
+                    touch_x_max_ = x_info.maximum;
+                }
+                if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &y_info) == 0) {
+                    touch_y_min_ = y_info.minimum;
+                    touch_y_max_ = y_info.maximum;
+                }
+                std::cerr << "dmr_b210_gui: direct touchscreen=" << path << '\n';
+                return;
+            }
+            ::close(fd);
+        }
+        std::cerr << "dmr_b210_gui: direct touchscreen not available\n";
+    }
+
+    void handle_direct_touch()
+    {
+        if (touch_fd_ < 0) return;
+        input_event event{};
+        while (::read(touch_fd_, &event, sizeof(event)) == sizeof(event)) {
+            if (event.type == EV_ABS && event.code == ABS_MT_POSITION_X) touch_x_ = event.value;
+            if (event.type == EV_ABS && event.code == ABS_MT_POSITION_Y) touch_y_ = event.value;
+            if (event.type == EV_KEY && event.code == BTN_TOUCH && event.value == 0) {
+                const int x = std::clamp((touch_x_ - touch_x_min_) * kWidth /
+                                             std::max(1, touch_x_max_ - touch_x_min_),
+                                         0, kWidth - 1);
+                const int y = std::clamp((touch_y_ - touch_y_min_) * kHeight /
+                                             std::max(1, touch_y_max_ - touch_y_min_),
+                                         0, kHeight - 1);
+                dispatch_pointer_up(x, y);
+            }
+        }
+    }
+#endif
+
+    void dispatch_pointer_up(int x, int y)
+    {
+        if (calibration_leave_dialog_) {
+            for (std::size_t index = calibration_dialog_hit_begin_;
+                 index < hits_.size(); ++index) {
+                const Hit& hit = hits_[index];
+                if (x >= hit.box.x && x < hit.box.x + hit.box.w &&
+                    y >= hit.box.y && y < hit.box.y + hit.box.h) {
+                    hit.callback();
+                    return;
+                }
+            }
+            return;
+        }
+        for (const Hit& hit : hits_) {
+            if (x >= hit.box.x && x < hit.box.x + hit.box.w &&
+                y >= hit.box.y && y < hit.box.y + hit.box.h) {
+                hit.callback();
+                return;
+            }
+        }
+    }
+
     int event_loop()
     {
         bool running = true;
@@ -1845,35 +2298,23 @@ private:
             SDL_Event event{};
             while (SDL_PollEvent(&event)) {
                 if (event.type == SDL_QUIT) {
-                    running = false;
+                    if (page_ == 4 && calibration_has_unsaved_work()) {
+                        request_calibration_exit(3);
+                    } else {
+                        running = false;
+                    }
                 } else if (event.type == SDL_MOUSEBUTTONUP || event.type == SDL_FINGERUP) {
                     const int raw_x = event.type == SDL_MOUSEBUTTONUP ? event.button.x :
                         static_cast<int>(event.tfinger.x * kWidth);
                     const int raw_y = event.type == SDL_MOUSEBUTTONUP ? event.button.y :
                         static_cast<int>(event.tfinger.y * kHeight);
                     const auto [x, y] = logical_point(raw_x, raw_y);
-                    if (page_ == 4 && calibration_.authorized && calibration_scroll_track_ &&
-                        x >= calibration_scroll_track_->x &&
-                        x < calibration_scroll_track_->x + calibration_scroll_track_->w &&
-                        y >= calibration_scroll_track_->y &&
-                        y < calibration_scroll_track_->y + calibration_scroll_track_->h) {
-                        constexpr int visible_rows = 8;
-                        const int max_scroll = static_cast<int>(kCalibrationInputDbm.size()) - visible_rows;
-                        const int travel = std::max(1, calibration_scroll_track_->h - 28);
-                        calibration_.scroll_row = std::clamp(
-                            (y - calibration_scroll_track_->y - 14) * max_scroll / travel,
-                            0, std::max(0, max_scroll));
-                        continue;
-                    }
-                    for (const Hit& hit : hits_) {
-                        if (x >= hit.box.x && x < hit.box.x + hit.box.w &&
-                            y >= hit.box.y && y < hit.box.y + hit.box.h) {
-                            hit.callback();
-                            break;
-                        }
-                    }
+                    dispatch_pointer_up(x, y);
                 }
             }
+#if defined(__linux__)
+            handle_direct_touch();
+#endif
             handle_network();
             draw();
             SDL_Delay(20);
@@ -1892,6 +2333,21 @@ private:
     SDL_Window* window_ = nullptr;
     SDL_Renderer* renderer_ = nullptr;
     SDL_Texture* canvas_ = nullptr;
+    bool direct_framebuffer_output_ = false;
+#if defined(__linux__)
+    int framebuffer_fd_ = -1;
+    fb_fix_screeninfo framebuffer_fix_{};
+    fb_var_screeninfo framebuffer_var_{};
+    std::uint8_t* framebuffer_map_ = nullptr;
+    std::vector<std::uint8_t> framebuffer_pixels_;
+    int touch_fd_ = -1;
+    int touch_x_ = 0;
+    int touch_y_ = 0;
+    int touch_x_min_ = 0;
+    int touch_x_max_ = kWidth - 1;
+    int touch_y_min_ = 0;
+    int touch_y_max_ = kHeight - 1;
+#endif
     TTF_Font* font_ = nullptr;
     TTF_Font* font_small_ = nullptr;
     TTF_Font* font_bold_ = nullptr;
@@ -1903,7 +2359,9 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
     std::vector<EventLine> events_;
     std::vector<Hit> hits_;
-    std::optional<SDL_Rect> calibration_scroll_track_;
+    std::vector<std::string> quick_profile_ids_;
+    std::optional<std::string> calibration_query_request_;
+    std::size_t calibration_dialog_hit_begin_ = 0;
     int page_ = 0;
     int channel_page_ = 0;
     std::string selected_profile_;
@@ -1911,14 +2369,20 @@ private:
     Channel draft_channel_;
     std::string draft_profile_id_;
     bool draft_dirty_ = false;
+    bool calibration_leave_dialog_ = false;
+    bool calibration_exit_after_save_ = false;
+    bool calibration_exit_after_discard_ = false;
+    int calibration_exit_target_page_ = 3;
     std::chrono::steady_clock::time_point active_call_started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point gui_started_ = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point next_calibration_query_{};
     bool ui_locked_ = false;
 };
 
 void usage(const char* program)
 {
-    std::cout << "Usage: " << program << " [--config PATH] [--stop-forwarding] [--self-test]\n";
+    std::cout << "Usage: " << program
+              << " [--config PATH] [--stop-forwarding] [--self-test] [--qa-view VIEW]\n";
 }
 
 } // namespace
@@ -1928,11 +2392,13 @@ int main(int argc, char** argv)
     std::filesystem::path config_path = "/etc/dmr-rpt/gui.yaml";
     bool stop_only = false;
     bool self_test = false;
+    std::string qa_view;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--config" && index + 1 < argc) config_path = argv[++index];
         else if (argument == "--stop-forwarding") stop_only = true;
         else if (argument == "--self-test") self_test = true;
+        else if (argument == "--qa-view" && index + 1 < argc) qa_view = argv[++index];
         else if (argument == "--help" || argument == "-h") {
             usage(argv[0]);
             return 0;
@@ -1951,6 +2417,7 @@ int main(int argc, char** argv)
     }
     try {
         GuiApp app(load_config(config_path), stop_only);
+        if (!qa_view.empty()) app.configure_qa_view(qa_view);
         return app.run();
     } catch (const std::exception& error) {
         std::cerr << "dmr_b210_gui: " << error.what() << '\n';

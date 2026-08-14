@@ -105,8 +105,13 @@ struct ReceiveAgcConfig {
 
 struct ReceiveGainControlConfig {
     std::int32_t high_gain_tenths_db = 250;
-    std::int32_t low_gain_tenths_db = 100;
-    std::string default_mode = "configured";
+    std::int32_t low_gain_tenths_db = 0;
+    std::string default_mode = "auto";
+    struct AutomaticSwitchingConfig {
+        bool enabled = true;
+        int high_to_low_threshold_dbm = -70;
+        int low_to_high_threshold_dbm = -60;
+    } automatic_switching;
 };
 
 struct RadioConfig {
@@ -263,6 +268,7 @@ void persist_rx_signal_calibration(
     const std::filesystem::path& path,
     const RxSignalCalibrationConfig& calibration);
 bool is_selectable_receive_gain_mode(const std::string& mode);
+bool is_receive_gain_selection_mode(const std::string& mode);
 std::int32_t receive_gain_tenths_db_for_mode(
     const ReceiveGainControlConfig& config, const std::string& mode);
 ValidatedConfig validate_config(const RepeaterConfig& config);

@@ -2188,7 +2188,8 @@ public:
                     calibration_->observe(physical_channel, gain,
                                           snapshot.signal_dbfs,
                                           snapshot.noise_dbfs,
-                                          snapshot.snr_db, monotonic_ms());
+                                          snapshot.snr_db, monotonic_ms(),
+                                          receiving);
                 }
                 const RxCalibrationReading reading = calibration_
                     ? calibration_->reading(physical_channel, gain,
@@ -2389,7 +2390,9 @@ public:
                     if (calibration_) {
                         calibration_->observe(channel, gain, snapshot.signal_dbfs,
                                               snapshot.noise_dbfs,
-                                              snapshot.snr_db, monotonic_ms());
+                                              snapshot.snr_db, monotonic_ms(),
+                                              snapshot.signal_dbfs &&
+                                                  *snapshot.signal_dbfs >= threshold_dbfs);
                     }
                     const RxCalibrationReading reading = calibration_
                         ? calibration_->reading(channel, gain,
@@ -2436,7 +2439,9 @@ public:
                                                   snapshot.signal_dbfs,
                                                   snapshot.noise_dbfs,
                                                   snapshot.snr_db,
-                                                  monotonic_ms());
+                                                  monotonic_ms(),
+                                                  snapshot.signal_dbfs &&
+                                                      *snapshot.signal_dbfs >= threshold_dbfs);
                         }
                         const RxCalibrationReading reading = calibration_
                             ? calibration_->reading(channel, gain,
@@ -2598,6 +2603,27 @@ public:
                            fm_agc_telemetry_, &ReceiveAgcTelemetry::input_tenths_dbfs)},
                       {"fm_gain_db", telemetry_value(
                            fm_agc_telemetry_, &ReceiveAgcTelemetry::gain_tenths_db)}}});
+    }
+
+    bool health_check(std::string& error) const override
+    {
+        if (!running_ || !source_ || !sink_) {
+            error = "B210 UHD session is not running";
+            return false;
+        }
+        try {
+            const double rx_rate = source_->get_samp_rate();
+            const double tx_rate = sink_->get_samp_rate();
+            if (std::abs(rx_rate - kUsrpRate) > 0.5 ||
+                std::abs(tx_rate - kUsrpRate) > 0.5) {
+                error = "B210 UHD sample-rate health check failed";
+                return false;
+            }
+            return true;
+        } catch (const std::exception& exception) {
+            error = std::string("B210 UHD health check failed: ") + exception.what();
+            return false;
+        }
     }
 
     bool set_rx_gain(int physical_rx_channel, std::int32_t gain_tenths_db,

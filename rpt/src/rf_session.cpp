@@ -78,6 +78,15 @@ void RfReinitializationController::poll(std::int64_t now_ms)
     }
 }
 
+bool RfReinitializationController::health_check(std::string& error) const
+{
+    if (!current_) {
+        error = "RF session is not running";
+        return false;
+    }
+    return current_->health_check(error);
+}
+
 void RfReinitializationController::stop()
 {
     if (current_) {

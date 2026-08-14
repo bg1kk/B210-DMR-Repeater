@@ -44,7 +44,6 @@ struct NetworkControlCommand {
     std::string calibration_session_id;
     std::optional<int> calibration_input_dbm;
     std::optional<std::int32_t> calibration_rx_gain_tenths_db;
-    std::optional<std::int32_t> calibration_start_input_dbm;
     NetworkChannelPatch channel_patch;
 };
 

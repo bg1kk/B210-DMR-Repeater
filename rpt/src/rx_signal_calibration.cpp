@@ -14,8 +14,8 @@
 namespace dmr_rpt {
 namespace {
 
-const std::vector<int> kStrongInputs{0, -10, -20, -30, -40, -50, -60};
-const std::vector<int> kWeakInputs{-60, -70, -80, -90, -100, -110, -120, -121};
+const std::vector<int> kLowInputs{10, 0, -10, -20, -30, -40, -50, -60, -70};
+const std::vector<int> kHighInputs{-60, -70, -80, -90, -100, -110, -120, -130, -140};
 
 const RxSignalCalibrationCurve* curve_for(const RxSignalCalibrationConfig& config,
                                           int rx_channel,
@@ -25,8 +25,8 @@ const RxSignalCalibrationCurve* curve_for(const RxSignalCalibrationConfig& confi
         return nullptr;
     }
     const std::size_t index = static_cast<std::size_t>(rx_channel);
-    return band == RxCalibrationBand::Strong ? &config.strong[index]
-                                              : &config.weak[index];
+    return band == RxCalibrationBand::Low ? &config.low[index]
+                                           : &config.high[index];
 }
 
 std::optional<double> interpolate(const RxSignalCalibrationCurve& curve,
@@ -62,20 +62,20 @@ std::optional<double> interpolate(const RxSignalCalibrationCurve& curve,
 
 const char* to_string(RxCalibrationBand band)
 {
-    return band == RxCalibrationBand::Strong ? "strong" : "weak";
+    return band == RxCalibrationBand::Low ? "low" : "high";
 }
 
 std::optional<RxCalibrationBand> rx_calibration_band_from_string(
     const std::string& value)
 {
-    if (value == "strong") return RxCalibrationBand::Strong;
-    if (value == "weak") return RxCalibrationBand::Weak;
+    if (value == "low") return RxCalibrationBand::Low;
+    if (value == "high") return RxCalibrationBand::High;
     return std::nullopt;
 }
 
 const std::vector<int>& rx_calibration_required_inputs(RxCalibrationBand band)
 {
-    return band == RxCalibrationBand::Strong ? kStrongInputs : kWeakInputs;
+    return band == RxCalibrationBand::Low ? kLowInputs : kHighInputs;
 }
 
 bool rx_calibration_curve_complete(const RxSignalCalibrationCurve& curve,
@@ -83,6 +83,10 @@ bool rx_calibration_curve_complete(const RxSignalCalibrationCurve& curve,
 {
     if (!curve.rx_gain_tenths_db || curve.points.size() !=
         rx_calibration_required_inputs(band).size()) {
+        return false;
+    }
+    if ((band == RxCalibrationBand::Low && *curve.rx_gain_tenths_db != 0) ||
+        (band == RxCalibrationBand::High && *curve.rx_gain_tenths_db <= 0)) {
         return false;
     }
     std::vector<RxSignalCalibrationPoint> points = curve.points;
@@ -95,7 +99,6 @@ bool rx_calibration_curve_complete(const RxSignalCalibrationCurve& curve,
     for (std::size_t index = 0; index < points.size(); ++index) {
         const auto& point = points[index];
         if (!std::isfinite(point.measured_dbfs) || !std::isfinite(point.snr_db) ||
-            point.snr_db < 12.0 ||
             point.input_dbm != rx_calibration_required_inputs(band)[index] ||
             !inputs.insert(point.input_dbm).second ||
             point.measured_dbfs >= previous_dbfs) {
@@ -134,8 +137,8 @@ RxCalibrationReading rx_calibration_reading(
     if (!rssi_dbfs || !std::isfinite(*rssi_dbfs)) {
         return result;
     }
-    for (const RxCalibrationBand band : {RxCalibrationBand::Strong,
-                                         RxCalibrationBand::Weak}) {
+    for (const RxCalibrationBand band : {RxCalibrationBand::Low,
+                                         RxCalibrationBand::High}) {
         const RxSignalCalibrationCurve* curve = curve_for(config, rx_channel, band);
         if (!curve || !curve->rx_gain_tenths_db ||
             *curve->rx_gain_tenths_db != rx_gain_tenths_db ||
@@ -149,6 +152,27 @@ RxCalibrationReading rx_calibration_reading(
         }
     }
     return result;
+}
+
+std::optional<double> rx_calibration_reference_dbfs(
+    const RxSignalCalibrationConfig& config, int rx_channel,
+    RxCalibrationBand band, int input_dbm,
+    std::int32_t expected_gain_tenths_db)
+{
+    const RxSignalCalibrationCurve* curve = curve_for(config, rx_channel, band);
+    if (!curve || !curve->rx_gain_tenths_db ||
+        *curve->rx_gain_tenths_db != expected_gain_tenths_db ||
+        !rx_calibration_curve_complete(*curve, band)) {
+        return std::nullopt;
+    }
+    const auto point = std::find_if(
+        curve->points.begin(), curve->points.end(),
+        [input_dbm](const RxSignalCalibrationPoint& item) {
+            return item.input_dbm == input_dbm;
+        });
+    return point == curve->points.end()
+        ? std::nullopt
+        : std::optional<double>(point->measured_dbfs);
 }
 
 RxSignalCalibrationRuntime::RxSignalCalibrationRuntime(
@@ -166,15 +190,19 @@ void RxSignalCalibrationRuntime::replace(RxSignalCalibrationConfig config)
 void RxSignalCalibrationRuntime::observe(
     int rx_channel, std::int32_t rx_gain_tenths_db,
     std::optional<double> measured_dbfs, std::optional<double> noise_dbfs,
-    std::optional<double> snr_db, std::int64_t observed_at_ms)
+    std::optional<double> snr_db, std::int64_t observed_at_ms,
+    bool receiving)
 {
     if (rx_channel < 0 || rx_channel >= 2) {
         return;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    observations_[static_cast<std::size_t>(rx_channel)] =
-        RxCalibrationObservation{rx_gain_tenths_db, measured_dbfs, noise_dbfs,
-                                 snr_db, observed_at_ms};
+    auto& history = observations_[static_cast<std::size_t>(rx_channel)];
+    history.push_back({rx_gain_tenths_db, measured_dbfs, noise_dbfs,
+                       snr_db, observed_at_ms, receiving});
+    while (history.size() > 5U) {
+        history.pop_front();
+    }
 }
 
 RxCalibrationReading RxSignalCalibrationRuntime::reading(
@@ -186,6 +214,15 @@ RxCalibrationReading RxSignalCalibrationRuntime::reading(
                                   measured_dbfs);
 }
 
+std::optional<double> RxSignalCalibrationRuntime::reference_dbfs(
+    int rx_channel, RxCalibrationBand band, int input_dbm,
+    std::int32_t expected_gain_tenths_db) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return rx_calibration_reference_dbfs(config_, rx_channel, band, input_dbm,
+                                         expected_gain_tenths_db);
+}
+
 std::optional<RxCalibrationObservation>
 RxSignalCalibrationRuntime::observation(int rx_channel) const
 {
@@ -193,7 +230,53 @@ RxSignalCalibrationRuntime::observation(int rx_channel) const
         return std::nullopt;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    return observations_[static_cast<std::size_t>(rx_channel)];
+    const auto& history = observations_[static_cast<std::size_t>(rx_channel)];
+    if (history.empty()) {
+        return std::nullopt;
+    }
+    return history.back();
+}
+
+std::optional<RxCalibrationObservation>
+RxSignalCalibrationRuntime::stable_observation(
+    int rx_channel, std::size_t required_samples, std::int64_t now_ms,
+    std::int64_t maximum_age_ms, double maximum_span_dbfs) const
+{
+    if (rx_channel < 0 || rx_channel >= 2 || required_samples == 0U ||
+        maximum_age_ms < 0 || maximum_span_dbfs < 0.0) {
+        return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto& history = observations_[static_cast<std::size_t>(rx_channel)];
+    if (history.size() < required_samples) {
+        return std::nullopt;
+    }
+    double minimum_dbfs = std::numeric_limits<double>::infinity();
+    double maximum_dbfs = -std::numeric_limits<double>::infinity();
+    const std::size_t first = history.size() - required_samples;
+    for (std::size_t index = first; index < history.size(); ++index) {
+        const RxCalibrationObservation& observation = history[index];
+        if (!observation.measured_dbfs ||
+            now_ms < observation.observed_at_ms ||
+            now_ms - observation.observed_at_ms > maximum_age_ms) {
+            return std::nullopt;
+        }
+        minimum_dbfs = std::min(minimum_dbfs, *observation.measured_dbfs);
+        maximum_dbfs = std::max(maximum_dbfs, *observation.measured_dbfs);
+    }
+    if (maximum_dbfs - minimum_dbfs > maximum_span_dbfs) {
+        return std::nullopt;
+    }
+    return history.back();
+}
+
+void RxSignalCalibrationRuntime::clear_observations(int rx_channel)
+{
+    if (rx_channel < 0 || rx_channel >= 2) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    observations_[static_cast<std::size_t>(rx_channel)].clear();
 }
 
 } // namespace dmr_rpt

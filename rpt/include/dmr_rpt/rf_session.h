@@ -20,6 +20,11 @@ public:
     virtual ~B210Session() = default;
     virtual void start(const ValidatedRfConfig& config) = 0;
     virtual void poll(std::int64_t now_ms) { (void)now_ms; }
+    virtual bool health_check(std::string& error) const
+    {
+        error.clear();
+        return true;
+    }
     virtual void stop() = 0;
     virtual bool set_rx_gain(int physical_rx_channel,
                              std::int32_t gain_tenths_db,
@@ -59,6 +64,7 @@ public:
     RfReinitializationResult reinitialize(const ValidatedRfConfig& candidate,
                                           const ValidatedRfConfig& previous);
     void poll(std::int64_t now_ms);
+    bool health_check(std::string& error) const;
     void stop();
     bool running() const;
     bool set_rx_gain(int physical_rx_channel, std::int32_t gain_tenths_db,

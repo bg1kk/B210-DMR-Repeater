@@ -96,7 +96,8 @@ public:
 
 class SelectiveSession final : public dmr_rpt::B210Session {
 public:
-    explicit SelectiveSession(int& live_sessions) : live_sessions_(live_sessions) {}
+    explicit SelectiveSession(int& live_sessions, bool& fail_health)
+        : live_sessions_(live_sessions), fail_health_(fail_health) {}
 
     ~SelectiveSession() override
     {
@@ -116,10 +117,21 @@ public:
         started = false;
     }
 
+    bool health_check(std::string& error) const override
+    {
+        if (fail_health_) {
+            error = "injected B210 health failure";
+            return false;
+        }
+        error.clear();
+        return true;
+    }
+
     bool started = false;
 
 private:
     int& live_sessions_;
+    bool& fail_health_;
 };
 
 class SelectiveFactory final : public dmr_rpt::B210SessionFactory {
@@ -129,12 +141,13 @@ public:
         if (live_sessions != 0) created_while_previous_session_alive = true;
         ++count;
         ++live_sessions;
-        return std::make_unique<SelectiveSession>(live_sessions);
+        return std::make_unique<SelectiveSession>(live_sessions, fail_health);
     }
 
     int count = 0;
     int live_sessions = 0;
     bool created_while_previous_session_alive = false;
+    bool fail_health = false;
 };
 
 void test_config(const std::filesystem::path& config_path)
@@ -162,16 +175,22 @@ void test_config(const std::filesystem::path& config_path)
                 validated.config.radio.receive_agc.release_tenths_db_per_second == 1200,
             "receive AGC default profile is configured");
     require(validated.config.radio.receive_gain_control.high_gain_tenths_db == 250 &&
-                validated.config.radio.receive_gain_control.low_gain_tenths_db == 100 &&
-                validated.config.radio.receive_gain_control.default_mode == "high",
+                validated.config.radio.receive_gain_control.low_gain_tenths_db == 0 &&
+                validated.config.radio.receive_gain_control.default_mode == "auto" &&
+                validated.config.radio.receive_gain_control.automatic_switching.enabled &&
+                validated.config.radio.receive_gain_control.automatic_switching
+                    .high_to_low_threshold_dbm == -70 &&
+                validated.config.radio.receive_gain_control.automatic_switching
+                    .low_to_high_threshold_dbm == -60,
             "receive gain control defaults are configured");
     require(!validated.config.data.enabled,
             "DMR data decode, relay, and active send remain disabled");
-    require(validated.config.contract_versions.at("RF") == "0.12.3" &&
+    require(validated.config.contract_versions.at("RF") == "0.12.4" &&
                 validated.config.contract_versions.at("AIR") == "0.6.2" &&
                 validated.config.contract_versions.at("RPT") == "0.7.0" &&
-                validated.config.contract_versions.at("NET") == "0.4.2" &&
-                validated.config.contract_versions.at("UDP") == "0.12.0" &&
+                validated.config.contract_versions.at("NET") == "0.4.6" &&
+                validated.config.contract_versions.at("UDP") == "0.12.3" &&
+                validated.config.contract_versions.at("CAL") == "0.3.0" &&
                 validated.config.contract_versions.at("SAFE") == "0.4.5" &&
                 validated.config.contract_versions.at("AFM") == "0.2.5" &&
                 validated.config.contract_versions.at("LOG") == "0.3.2",
@@ -354,11 +373,26 @@ void test_config(const std::filesystem::path& config_path)
     require_config_error([&]() { dmr_rpt::validate_config(bad); },
                          "receive gain control high/low order");
 
+    bad = config;
+    bad.radio.receive_gain_control.low_gain_tenths_db = 10;
+    require_config_error([&]() { dmr_rpt::validate_config(bad); },
+                         "automatic receive low gain is fixed at zero");
+
     require(dmr_rpt::receive_gain_tenths_db_for_mode(
                 config.radio.receive_gain_control, "high") == 250 &&
                 dmr_rpt::receive_gain_tenths_db_for_mode(
-                    config.radio.receive_gain_control, "low") == 100,
+                    config.radio.receive_gain_control, "low") == 0,
             "receive gain modes resolve configured gains");
+    require(dmr_rpt::is_receive_gain_selection_mode("auto") &&
+                dmr_rpt::is_receive_gain_selection_mode("high") &&
+                !dmr_rpt::is_receive_gain_selection_mode("custom"),
+            "receive gain selection permits auto, high and low only");
+
+    bad = config;
+    bad.radio.receive_gain_control.automatic_switching
+        .high_to_low_threshold_dbm = -69;
+    require_config_error([&]() { dmr_rpt::validate_config(bad); },
+                         "automatic receive gain thresholds are fixed");
 
     bad = config;
     bad.radio.receive_agc.attack_tenths_db_per_second = 0;
@@ -512,6 +546,76 @@ void test_receive_agc()
     require(std::abs(disabled.snapshot().gain_db) < 0.01 &&
                 std::abs(disabled.gain_linear() - 1.0) < 0.01,
             "disabled receive AGC remains unity gain");
+}
+
+void test_rx_signal_calibration()
+{
+    const auto& low = dmr_rpt::rx_calibration_required_inputs(
+        dmr_rpt::RxCalibrationBand::Low);
+    const auto& high = dmr_rpt::rx_calibration_required_inputs(
+        dmr_rpt::RxCalibrationBand::High);
+    require(low == std::vector<int>({10, 0, -10, -20, -30, -40, -50, -60, -70}),
+            "low calibration input ladder is +10 through -70 dBm");
+    require(high == std::vector<int>({-60, -70, -80, -90, -100, -110, -120,
+                                      -130, -140}),
+            "high calibration input ladder is -60 through -140 dBm");
+
+    dmr_rpt::RxSignalCalibrationCurve low_curve;
+    low_curve.rx_gain_tenths_db = 0;
+    for (const int input_dbm : low) {
+        low_curve.points.push_back(
+            {input_dbm, static_cast<double>(input_dbm) - 20.0, 5.0, {}});
+    }
+    require(dmr_rpt::rx_calibration_curve_complete(
+                low_curve, dmr_rpt::RxCalibrationBand::Low),
+            "complete low calibration requires fixed zero RX gain");
+
+    dmr_rpt::RxSignalCalibrationCurve invalid_low = low_curve;
+    invalid_low.rx_gain_tenths_db = 10;
+    require(!dmr_rpt::rx_calibration_curve_complete(
+                invalid_low, dmr_rpt::RxCalibrationBand::Low),
+            "low calibration rejects non-zero RX gain");
+
+    dmr_rpt::RxSignalCalibrationCurve high_curve;
+    high_curve.rx_gain_tenths_db = 250;
+    for (const int input_dbm : high) {
+        high_curve.points.push_back(
+            {input_dbm, static_cast<double>(input_dbm) + 50.0, 5.0, {}});
+    }
+    require(dmr_rpt::rx_calibration_curve_complete(
+                high_curve, dmr_rpt::RxCalibrationBand::High),
+            "complete high calibration accepts a locked positive RX gain");
+
+    dmr_rpt::RxSignalCalibrationConfig calibration;
+    calibration.low[0] = low_curve;
+    calibration.high[0] = high_curve;
+    const dmr_rpt::RxCalibrationReading low_reading =
+        dmr_rpt::rx_calibration_reading(calibration, 0, 0, -45.0);
+    require(low_reading.calibrated && low_reading.rssi_dbm &&
+                std::abs(*low_reading.rssi_dbm + 25.0) < 0.001,
+            "low calibration interpolates measured dBFS into dBm");
+    require(!dmr_rpt::rx_calibration_reading(calibration, 0, 200, -45.0).calibrated,
+            "calibration rejects a curve with a mismatched RX gain");
+    require(dmr_rpt::rx_calibration_reference_dbfs(
+                calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 250) ==
+                std::optional<double>(-20.0) &&
+                dmr_rpt::rx_calibration_reference_dbfs(
+                    calibration, 0, dmr_rpt::RxCalibrationBand::Low, -60, 0) ==
+                    std::optional<double>(-80.0) &&
+                !dmr_rpt::rx_calibration_reference_dbfs(
+                    calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 0),
+            "calibration exposes only matching-gain automatic-switch anchors");
+
+    dmr_rpt::RxSignalCalibrationRuntime runtime(calibration);
+    for (int index = 0; index < 5; ++index) {
+        runtime.observe(0, 0, -45.0 + index * 0.1, -70.0, 5.0,
+                        1000 + index * 200);
+    }
+    require(runtime.stable_observation(0, 5U, 1800, 1000, 1.0).has_value(),
+            "five fresh samples within 1 dB are stable");
+    runtime.clear_observations(0);
+    require(!runtime.stable_observation(0, 5U, 1800, 1000, 1.0).has_value(),
+            "clearing calibration observations removes stale stability evidence");
 }
 
 
@@ -687,6 +791,12 @@ void test_rf_reinit(const dmr_rpt::ValidatedRfConfig& rf)
             "candidate session is created only after old RF session is destroyed");
     require(controller.running(), "controller running after rollback");
     controller.poll(1234);
+    factory.fail_health = true;
+    std::string health_error;
+    require(!controller.health_check(health_error) &&
+                health_error == "injected B210 health failure",
+            "B210 health failure is reported to the RF controller");
+    factory.fail_health = false;
     controller.stop();
     require(!controller.running(), "controller stops and releases current RF session");
     require(factory.live_sessions == 0,
@@ -1105,6 +1215,7 @@ int main(int argc, char** argv)
         const dmr_rpt::ValidatedConfig validated = dmr_rpt::validate_config(config);
         test_router_and_safe(validated.config);
         test_receive_agc();
+        test_rx_signal_calibration();
         test_ctcss_detector();
         test_io(validated.config.io_status);
         test_audit(validated.config.logging);

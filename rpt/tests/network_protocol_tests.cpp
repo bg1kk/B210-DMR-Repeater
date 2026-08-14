@@ -157,7 +157,7 @@ void test_udp_status_query()
                 result.code = "ok";
                 result.state_json =
                     "{\"mode\":\"high\",\"high_gain_tenths_db\":250,"
-                    "\"low_gain_tenths_db\":100}";
+                    "\"low_gain_tenths_db\":0}";
                 return result;
             }
             if (command.operation == "get_version") {
@@ -190,11 +190,12 @@ void test_udp_status_query()
         callbacks.gain_control_json = [] {
             return std::string(
                 "{\"mode\":\"high\",\"high_gain_tenths_db\":250,"
-                "\"low_gain_tenths_db\":100}");
+                "\"low_gain_tenths_db\":0}");
         };
         callbacks.status_json = [] {
             return std::string(
-                "{\"v\":1,\"type\":\"status\",\"rf_running\":true}");
+                "{\"v\":1,\"type\":\"status\",\"rf_running\":false,"
+                "\"rf_fault\":true,\"last_error\":\"B210 unavailable\"}");
         };
         dmr_rpt::NetworkControlService service(
             udp_config, tcp_config, "9001", callbacks);
@@ -251,6 +252,8 @@ void test_udp_status_query()
                                 std::string::npos &&
                             frame.find("\"gain_control\":{\"mode\":\"high\"") !=
                                 std::string::npos &&
+                            frame.find("\"rf_fault\":true") != std::string::npos &&
+                            frame.find("B210 unavailable") != std::string::npos &&
                             frame.find("\"active_call\":{\"rx_channel\":0,"
                                        "\"source_id\":100103,"
                                        "\"destination_id\":100102,"

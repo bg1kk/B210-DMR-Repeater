@@ -283,8 +283,6 @@ std::optional<NetworkControlCommand> parse_command(const std::string& body)
         json_string_field(body, "session_id").value_or("");
     command.calibration_input_dbm =
         json_integer_field<int>(body, "input_dbm");
-    command.calibration_start_input_dbm =
-        json_integer_field<std::int32_t>(body, "start_input_dbm");
     command.calibration_rx_gain_tenths_db =
         json_integer_field<std::int32_t>(body, "rx_gain_tenths_db");
     if (command.operation.empty()) {

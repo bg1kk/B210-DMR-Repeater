@@ -126,6 +126,15 @@ int get_int(const YAML::Node& node, const char* key, const std::string& context)
     return static_cast<int>(value);
 }
 
+int get_int_default(const YAML::Node& node, const char* key, int fallback,
+                    const std::string& context)
+{
+    if (!node[key]) {
+        return fallback;
+    }
+    return get_int(node, key, context);
+}
+
 std::uint32_t get_dmr_id(const YAML::Node& node,
                          const char* key,
                          const std::string& context)
@@ -337,6 +346,22 @@ ReceiveGainControlConfig parse_receive_gain_control(const YAML::Node& radio)
         "radio.receive_gain_control");
     gain_control.default_mode = get_string_default(
         node, "default_mode", gain_control.default_mode);
+    const YAML::Node automatic = node["automatic_switching"];
+    if (automatic) {
+        require_map(automatic, "radio.receive_gain_control.automatic_switching");
+        gain_control.automatic_switching.enabled = get_bool_default(
+            automatic, "enabled", gain_control.automatic_switching.enabled);
+        gain_control.automatic_switching.high_to_low_threshold_dbm =
+            get_int_default(
+                automatic, "high_to_low_threshold_dbm",
+                gain_control.automatic_switching.high_to_low_threshold_dbm,
+                "radio.receive_gain_control.automatic_switching");
+        gain_control.automatic_switching.low_to_high_threshold_dbm =
+            get_int_default(
+                automatic, "low_to_high_threshold_dbm",
+                gain_control.automatic_switching.low_to_high_threshold_dbm,
+                "radio.receive_gain_control.automatic_switching");
+    }
     return gain_control;
 }
 
@@ -417,10 +442,10 @@ RxSignalCalibrationConfig parse_rx_signal_calibration(const YAML::Node& radio)
         }
         require_map(receiver, "radio.rx_signal_calibration." + name);
         const std::size_t index = static_cast<std::size_t>(channel);
-        calibration.strong[index] = parse_rx_calibration_curve(
-            receiver["strong"], "radio.rx_signal_calibration." + name + ".strong");
-        calibration.weak[index] = parse_rx_calibration_curve(
-            receiver["weak"], "radio.rx_signal_calibration." + name + ".weak");
+        calibration.low[index] = parse_rx_calibration_curve(
+            receiver["low"], "radio.rx_signal_calibration." + name + ".low");
+        calibration.high[index] = parse_rx_calibration_curve(
+            receiver["high"], "radio.rx_signal_calibration." + name + ".high");
     }
     return calibration;
 }
@@ -625,14 +650,15 @@ RepeaterConfig parse_root(const YAML::Node& root)
     require_map(root, "root");
     RepeaterConfig config;
     config.contract_versions = {
-        {"RF", "0.12.3"},
+        {"RF", "0.12.4"},
         {"AIR", "0.6.2"},
         {"RPT", "0.7.0"},
         {"AUDIO", "0.3.4"},
         {"DATA", "0.3.8"},
-        {"NET", "0.4.2"},
+        {"NET", "0.4.6"},
         {"SAFE", "0.4.5"},
-        {"UDP", "0.12.0"},
+        {"UDP", "0.12.3"},
+        {"CAL", "0.3.0"},
         {"AFM", "0.2.5"},
         {"LOG", "0.3.2"},
         {"IO", "0.1.0"},
@@ -1046,11 +1072,11 @@ void persist_rx_signal_calibration(
         for (int channel = 0; channel < 2; ++channel) {
             YAML::Node receiver(YAML::NodeType::Map);
             const std::size_t index = static_cast<std::size_t>(channel);
-            for (const auto band : {RxCalibrationBand::Strong,
-                                    RxCalibrationBand::Weak}) {
+            for (const auto band : {RxCalibrationBand::Low,
+                                    RxCalibrationBand::High}) {
                 const RxSignalCalibrationCurve& curve =
-                    band == RxCalibrationBand::Strong
-                        ? calibration.strong[index] : calibration.weak[index];
+                    band == RxCalibrationBand::Low
+                        ? calibration.low[index] : calibration.high[index];
                 RxSignalCalibrationCurve fitted = curve;
                 fit_rx_signal_calibration_curve(fitted);
                 YAML::Node curve_node(YAML::NodeType::Map);
@@ -1157,6 +1183,11 @@ bool is_selectable_receive_gain_mode(const std::string& mode)
     return mode == "high" || mode == "low";
 }
 
+bool is_receive_gain_selection_mode(const std::string& mode)
+{
+    return mode == "auto" || is_selectable_receive_gain_mode(mode);
+}
+
 std::int32_t receive_gain_tenths_db_for_mode(
     const ReceiveGainControlConfig& config, const std::string& mode)
 {
@@ -1200,20 +1231,24 @@ ValidatedConfig validate_config(const RepeaterConfig& config)
     }
     const ReceiveGainControlConfig& gain_control =
         config.radio.receive_gain_control;
-    if (gain_control.low_gain_tenths_db < 0 ||
+    if (gain_control.low_gain_tenths_db != 0 ||
         gain_control.high_gain_tenths_db <= gain_control.low_gain_tenths_db ||
         (gain_control.default_mode != "configured" &&
-         !is_selectable_receive_gain_mode(gain_control.default_mode))) {
+         !is_receive_gain_selection_mode(gain_control.default_mode)) ||
+        gain_control.automatic_switching.high_to_low_threshold_dbm != -70 ||
+        gain_control.automatic_switching.low_to_high_threshold_dbm != -60 ||
+        gain_control.automatic_switching.high_to_low_threshold_dbm >=
+            gain_control.automatic_switching.low_to_high_threshold_dbm) {
         throw ConfigError("radio.receive_gain_control parameters are invalid");
     }
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
-        for (const auto band : {RxCalibrationBand::Strong,
-                                RxCalibrationBand::Weak}) {
+        for (const auto band : {RxCalibrationBand::Low,
+                                RxCalibrationBand::High}) {
             const RxSignalCalibrationCurve& curve =
-                band == RxCalibrationBand::Strong
-                    ? config.radio.rx_signal_calibration.strong[index]
-                    : config.radio.rx_signal_calibration.weak[index];
+                band == RxCalibrationBand::Low
+                    ? config.radio.rx_signal_calibration.low[index]
+                    : config.radio.rx_signal_calibration.high[index];
             if (!curve.points.empty() &&
                 !rx_calibration_curve_complete(curve, band)) {
                 throw ConfigError("radio.rx_signal_calibration curve is incomplete or invalid");
@@ -1444,15 +1479,20 @@ std::string canonical_config_summary(const RepeaterConfig& config)
     out << "radio.receive_gain_control="
         << config.radio.receive_gain_control.high_gain_tenths_db << ':'
         << config.radio.receive_gain_control.low_gain_tenths_db << ':'
-        << config.radio.receive_gain_control.default_mode << '\n';
+        << config.radio.receive_gain_control.default_mode << ':'
+        << (config.radio.receive_gain_control.automatic_switching.enabled ? "true" : "false")
+        << ':' << config.radio.receive_gain_control.automatic_switching
+                      .high_to_low_threshold_dbm
+        << ':' << config.radio.receive_gain_control.automatic_switching
+                      .low_to_high_threshold_dbm << '\n';
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
-        for (const auto band : {RxCalibrationBand::Strong,
-                                RxCalibrationBand::Weak}) {
+        for (const auto band : {RxCalibrationBand::Low,
+                                RxCalibrationBand::High}) {
             const RxSignalCalibrationCurve& curve =
-                band == RxCalibrationBand::Strong
-                    ? config.radio.rx_signal_calibration.strong[index]
-                    : config.radio.rx_signal_calibration.weak[index];
+                band == RxCalibrationBand::Low
+                    ? config.radio.rx_signal_calibration.low[index]
+                    : config.radio.rx_signal_calibration.high[index];
             out << "radio.rx_signal_calibration.rx" << channel + 1 << '.'
                 << to_string(band) << '=';
             if (curve.rx_gain_tenths_db) {

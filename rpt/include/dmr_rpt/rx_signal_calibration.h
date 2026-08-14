@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <mutex>
 #include <string>
@@ -14,7 +15,7 @@
 
 namespace dmr_rpt {
 
-enum class RxCalibrationBand { Strong, Weak };
+enum class RxCalibrationBand { Low, High };
 
 struct RxSignalCalibrationPoint {
     int input_dbm = 0;
@@ -37,8 +38,8 @@ struct RxSignalCalibrationCurve {
 };
 
 struct RxSignalCalibrationConfig {
-    std::array<RxSignalCalibrationCurve, 2> strong;
-    std::array<RxSignalCalibrationCurve, 2> weak;
+    std::array<RxSignalCalibrationCurve, 2> low;
+    std::array<RxSignalCalibrationCurve, 2> high;
 };
 
 struct RxCalibrationReading {
@@ -52,6 +53,7 @@ struct RxCalibrationObservation {
     std::optional<double> noise_dbfs;
     std::optional<double> snr_db;
     std::int64_t observed_at_ms = 0;
+    bool receiving = false;
 };
 
 class RxSignalCalibrationRuntime {
@@ -63,15 +65,24 @@ public:
                  std::optional<double> measured_dbfs,
                  std::optional<double> noise_dbfs,
                  std::optional<double> snr_db,
-                 std::int64_t observed_at_ms);
+                 std::int64_t observed_at_ms,
+                 bool receiving = false);
     RxCalibrationReading reading(int rx_channel, std::int32_t rx_gain_tenths_db,
                                  std::optional<double> measured_dbfs) const;
+    std::optional<double> reference_dbfs(
+        int rx_channel, RxCalibrationBand band, int input_dbm,
+        std::int32_t expected_gain_tenths_db) const;
     std::optional<RxCalibrationObservation> observation(int rx_channel) const;
+    std::optional<RxCalibrationObservation> stable_observation(
+        int rx_channel, std::size_t required_samples,
+        std::int64_t now_ms, std::int64_t maximum_age_ms,
+        double maximum_span_dbfs) const;
+    void clear_observations(int rx_channel);
 
 private:
     mutable std::mutex mutex_;
     RxSignalCalibrationConfig config_;
-    std::array<std::optional<RxCalibrationObservation>, 2> observations_;
+    std::array<std::deque<RxCalibrationObservation>, 2> observations_;
 };
 
 const char* to_string(RxCalibrationBand band);
@@ -84,5 +95,9 @@ void fit_rx_signal_calibration_curve(RxSignalCalibrationCurve& curve);
 RxCalibrationReading rx_calibration_reading(
     const RxSignalCalibrationConfig& config, int rx_channel,
     std::int32_t rx_gain_tenths_db, std::optional<double> rssi_dbfs);
+std::optional<double> rx_calibration_reference_dbfs(
+    const RxSignalCalibrationConfig& config, int rx_channel,
+    RxCalibrationBand band, int input_dbm,
+    std::int32_t expected_gain_tenths_db);
 
 } // namespace dmr_rpt

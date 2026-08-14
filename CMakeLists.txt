@@ -17,6 +17,10 @@ option(DMR_B210_SOURCE_BUILD_TESTS "Build source-tree unit tests" ON)
 
 set(DMR_B210_DEFAULT_CONFIG_PATH "/etc/dmr-rpt/repeater.yaml"
     CACHE FILEPATH "Production repeater configuration path")
+set(DMR_B210_REPEATER_EXAMPLE_CONFIG ""
+    CACHE FILEPATH "Repeater YAML used by CTest contract tests")
+set(DMR_B210_REPEATER_VECTOR_ROOT ""
+    CACHE PATH "828S test vector root used by CTest contract tests")
 set(MBELIB_ROOT "" CACHE PATH "mbelib installation or source root")
 set(OP25_REPEATER_SOURCE_DIR "" CACHE PATH
     "Path to the OP25 gr-op25_repeater/lib source directory")
@@ -122,6 +126,16 @@ if(DMR_B210_SOURCE_BUILD_RPT)
             target_link_libraries(${test_name} PRIVATE dmr_b210_repeater_core)
         endforeach()
         add_test(NAME network_protocol_tests COMMAND network_protocol_tests)
+        if(EXISTS "${DMR_B210_REPEATER_EXAMPLE_CONFIG}" AND
+           IS_DIRECTORY "${DMR_B210_REPEATER_VECTOR_ROOT}")
+            add_test(NAME repeater_contract_tests
+                COMMAND repeater_contract_tests
+                    "${DMR_B210_REPEATER_EXAMPLE_CONFIG}"
+                    "${DMR_B210_REPEATER_VECTOR_ROOT}")
+        else()
+            message(STATUS
+                "Repeater contract CTest disabled: set the example config and vector root")
+        endif()
 
         add_executable(audio_recording_tests rpt/tests/audio_recording_tests.cpp)
         target_compile_features(audio_recording_tests PRIVATE cxx_std_17)
