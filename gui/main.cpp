@@ -429,6 +429,8 @@ const std::array<int, 9> kHighCalibrationInputDbm = {
     -60, -70, -80, -90, -100, -110, -120, -130, -140
 };
 
+constexpr int kDefaultHighCalibrationGainTenthsDb = 250;
+
 int standard_ctcss_tone(int tone_tenths_hz)
 {
     const auto closest = std::min_element(
@@ -495,6 +497,7 @@ struct CalibrationUiState {
     int gain_tenths_db = 0;
     std::array<std::optional<int>, 4> column_gain{};
     std::array<std::map<int, std::pair<double, double>>, 4> column_points{};
+    std::array<bool, 4> column_edited{};
     int selected_column = 0;
     bool authorized = false;
     std::string password_input;
@@ -511,6 +514,19 @@ bool calibration_step_available(const CalibrationUiState& calibration)
         ? kHighCalibrationInputDbm : kLowCalibrationInputDbm;
     return std::find(inputs.begin(), inputs.end(), *calibration.next_input_dbm) !=
         inputs.end();
+}
+
+int selected_calibration_gain(const CalibrationUiState& calibration)
+{
+    if (calibration.band == "low") return 0;
+    if (calibration.selected_column >= 0 && calibration.selected_column < 4) {
+        const auto stored = calibration.column_gain[
+            static_cast<std::size_t>(calibration.selected_column)];
+        if (stored && *stored > 0) return *stored;
+    }
+    return calibration.gain_tenths_db > 0
+        ? calibration.gain_tenths_db
+        : kDefaultHighCalibrationGainTenthsDb;
 }
 
 struct EventLine {
@@ -646,6 +662,15 @@ public:
         const bool last_point_available = calibration_step_available(calibration);
         calibration.completed_points = 9;
         calibration.next_input_dbm.reset();
+        CalibrationUiState high_gain;
+        high_gain.band = "high";
+        high_gain.selected_column = 1;
+        const bool default_high_gain =
+            selected_calibration_gain(high_gain) ==
+            kDefaultHighCalibrationGainTenthsDb;
+        high_gain.column_gain[1] = 320;
+        const bool stored_high_gain = selected_calibration_gain(high_gain) == 320;
+        high_gain.band = "low";
         return level.label == "S9" && level.lit_segments == 9 &&
             s_meter(-67.0, -87.0).label == "S9 +20 dB" &&
             s_meter(-140.0, -87.0).lit_segments == 0 &&
@@ -653,7 +678,9 @@ public:
             kLowCalibrationInputDbm.front() == 0 &&
             kLowCalibrationInputDbm.back() == -80 &&
             first_point_available && last_point_available &&
-            !calibration_step_available(calibration);
+            !calibration_step_available(calibration) &&
+            default_high_gain && stored_high_gain &&
+            selected_calibration_gain(high_gain) == 0;
     }
 
     void configure_qa_view(const std::string& view)
@@ -1082,6 +1109,9 @@ private:
             if (rx_channel < 0 || rx_channel > 1 ||
                 (band != "low" && band != "high")) continue;
             const int column = rx_channel * 2 + (band == "high" ? 1 : 0);
+            if (calibration_.column_edited[static_cast<std::size_t>(column)]) {
+                continue;
+            }
             calibration_.column_gain[static_cast<std::size_t>(column)] =
                 json_number<int>(curve, "rx_gain_tenths_db");
             calibration_.column_points[static_cast<std::size_t>(column)].clear();
@@ -1147,7 +1177,28 @@ private:
                 }
                 calibration_.next_input_dbm = json_number<int>(state, "next_input_dbm");
                 calibration_.completed_points = json_number<int>(state, "completed_points").value_or(0);
-                calibration_.gain_tenths_db = json_number<int>(state, "rx_gain_tenths_db").value_or(0);
+                if (!session_id.empty()) {
+                    calibration_.gain_tenths_db =
+                        json_number<int>(state, "rx_gain_tenths_db").value_or(
+                            selected_calibration_gain(calibration_));
+                } else {
+                    calibration_.gain_tenths_db =
+                        selected_calibration_gain(calibration_);
+                }
+                if (session_id.empty() &&
+                    (calibration_.state == "cancelled" ||
+                     calibration_.state == "committed")) {
+                    const int completed_rx = json_number<int>(state, "rx_channel")
+                        .value_or(calibration_.rx_channel);
+                    const std::string completed_band = json_string(state, "band")
+                        .value_or(calibration_.band);
+                    const int completed_column = completed_rx * 2 +
+                        (completed_band == "high" ? 1 : 0);
+                    if (completed_column >= 0 && completed_column < 4) {
+                        calibration_.column_edited[
+                            static_cast<std::size_t>(completed_column)] = false;
+                    }
+                }
             }
             if (!calibration_state || !qa_view_enabled_) {
                 update_calibration_state(state);
@@ -1888,8 +1939,7 @@ private:
         calibration_.selected_column = column;
         calibration_.rx_channel = column / 2;
         calibration_.band = column % 2 == 0 ? "low" : "high";
-        calibration_.gain_tenths_db = calibration_.band == "low" ? 0 :
-            calibration_.column_gain[static_cast<std::size_t>(column)].value_or(250);
+        calibration_.gain_tenths_db = selected_calibration_gain(calibration_);
     }
 
     void set_calibration_gain(int delta_tenths_db)
@@ -1899,12 +1949,12 @@ private:
             return;
         }
         const int column = calibration_.selected_column;
-        const int current = calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
-            calibration_.gain_tenths_db);
-        const int next = std::clamp(current + delta_tenths_db, 0, 1000);
+        const int current = selected_calibration_gain(calibration_);
+        const int next = std::clamp(current + delta_tenths_db, 10, 1000);
         if (next != current) {
             calibration_.column_points[static_cast<std::size_t>(column)].clear();
             calibration_.column_gain[static_cast<std::size_t>(column)] = next;
+            calibration_.column_edited[static_cast<std::size_t>(column)] = true;
         }
         calibration_.gain_tenths_db = next;
     }
@@ -1920,13 +1970,15 @@ private:
             add_event("CAL auto: RSSI unavailable", kRed);
             return;
         }
-        const int current = calibration_.column_gain[static_cast<std::size_t>(calibration_.selected_column)]
-            .value_or(calibration_.gain_tenths_db);
-        const int next = std::clamp(current + static_cast<int>(std::lround((-20.0 - receiver.rssi_dbfs) * 10.0)),
-                                    0, 1000);
+        const int current = selected_calibration_gain(calibration_);
+        const int next = std::clamp(
+            current + static_cast<int>(std::lround(
+                (-20.0 - receiver.rssi_dbfs) * 10.0)), 10, 1000);
         if (next != current) {
             calibration_.column_points[static_cast<std::size_t>(calibration_.selected_column)].clear();
             calibration_.column_gain[static_cast<std::size_t>(calibration_.selected_column)] = next;
+            calibration_.column_edited[
+                static_cast<std::size_t>(calibration_.selected_column)] = true;
         }
         calibration_.gain_tenths_db = next;
     }
@@ -1952,10 +2004,19 @@ private:
 
     void begin_selected_calibration()
     {
+        const int gain_tenths_db = selected_calibration_gain(calibration_);
+        calibration_.gain_tenths_db = gain_tenths_db;
+        if (calibration_.band == "high") {
+            calibration_.column_gain[
+                static_cast<std::size_t>(calibration_.selected_column)] =
+                gain_tenths_db;
+            calibration_.column_edited[
+                static_cast<std::size_t>(calibration_.selected_column)] = true;
+        }
         std::string fields = "\"rx_channel\":" + std::to_string(calibration_.rx_channel) +
             ",\"calibration_band\":\"" + calibration_.band + "\"" +
             ",\"rx_gain_tenths_db\":" + std::to_string(
-                calibration_.band == "low" ? 0 : calibration_.gain_tenths_db);
+                gain_tenths_db);
         send_control("rx_calibration_begin", fields, "CAL begin");
     }
 
@@ -2098,10 +2159,10 @@ private:
         draw_box({x, table_y, table_width, table_height}, kPanel);
         draw_text_vcentered_clipped(high ? "高增益校准" : "低增益校准", x + 10,
                                     high ? kAmber : kCyan,
-                                    {x + 10, table_y + 5, 120, 20}, font_bold_);
+                                    {x + 10, table_y + 5, 132, 20}, font_);
         draw_text_vcentered_clipped(high ? "-60 至 -140 dBm" : "0 至 -80 dBm",
-                                    x + 136, kMuted,
-                                    {x + 136, table_y + 7, 188, 18}, font_small_);
+                                    x + 150, kMuted,
+                                    {x + 150, table_y + 7, 194, 18}, font_small_);
         draw_text_vcentered_clipped("dBm", x + 12, kMuted,
                                     {x + 12, table_y + 29, 46, 18}, font_small_);
 
@@ -2200,24 +2261,20 @@ private:
                     [this] { select_calibration_column(calibration_.rx_channel * 2); }, calibration_selection_enabled);
         add_button({280, 112, 76, 30}, "高档", calibration_.band == "high" ? kCyan : kDark,
                     [this] { select_calibration_column(calibration_.rx_channel * 2 + 1); }, calibration_selection_enabled);
-        const int column = calibration_.selected_column;
-        const int gain = calibration_.band == "low" ? 0 :
-            calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
-                calibration_.gain_tenths_db);
-        draw_text("RX GAIN", 386, 86, kMuted, font_small_);
-        draw_text(gain_text(gain), 464, 86, kCyan, font_bold_);
-        add_button({386, 112, 68, 30}, "自动", kDark,
+        const int gain = selected_calibration_gain(calibration_);
+        draw_text_vcentered_clipped("增益 " + gain_text(gain), 372, kCyan,
+                                    {372, 112, 116, 30}, font_small_);
+        add_button({494, 112, 64, 30}, "自动", kDark,
                    [this] { auto_calibration_gain(); },
                    calibration_selection_enabled && calibration_.band == "high");
-        add_button({462, 112, 46, 30}, "-", kDark,
+        add_button({566, 112, 46, 30}, "-", kDark,
                    [this] { set_calibration_gain(-10); },
                    calibration_selection_enabled && calibration_.band == "high");
-        add_button({514, 112, 46, 30}, "+", kDark,
+        add_button({620, 112, 46, 30}, "+", kDark,
                    [this] { set_calibration_gain(10); },
                    calibration_selection_enabled && calibration_.band == "high");
-        draw_text_clipped(calibration_.band == "low" ? "低档固定 0.0 dB" :
-                          "高档会话增益 " + gain_text(gain), 572, 116, kMuted,
-                          {572, 112, 198, 30}, font_small_);
+        draw_text_vcentered_clipped(calibration_.band == "low" ? "固定" : "启动时写入",
+                                    678, kMuted, {678, 112, 90, 30}, font_small_);
         add_button({24, 150, 90, 30}, "开始", kGreen,
                    [this] { begin_selected_calibration(); },
                    controls_enabled() && calibration_.session_id.empty());
