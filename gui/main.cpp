@@ -524,7 +524,7 @@ int selected_calibration_gain(const CalibrationUiState& calibration)
             static_cast<std::size_t>(calibration.selected_column)];
         if (stored && *stored > 0) return *stored;
     }
-    return calibration.gain_tenths_db > 0
+    return !calibration.session_id.empty() && calibration.gain_tenths_db > 0
         ? calibration.gain_tenths_db
         : kDefaultHighCalibrationGainTenthsDb;
 }
@@ -670,6 +670,9 @@ public:
             kDefaultHighCalibrationGainTenthsDb;
         high_gain.column_gain[1] = 320;
         const bool stored_high_gain = selected_calibration_gain(high_gain) == 320;
+        high_gain.selected_column = 3;
+        const bool independent_high_gain = selected_calibration_gain(high_gain) ==
+            kDefaultHighCalibrationGainTenthsDb;
         high_gain.band = "low";
         return level.label == "S9" && level.lit_segments == 9 &&
             s_meter(-67.0, -87.0).label == "S9 +20 dB" &&
@@ -679,7 +682,7 @@ public:
             kLowCalibrationInputDbm.back() == -80 &&
             first_point_available && last_point_available &&
             !calibration_step_available(calibration) &&
-            default_high_gain && stored_high_gain &&
+            default_high_gain && stored_high_gain && independent_high_gain &&
             selected_calibration_gain(high_gain) == 0;
     }
 
