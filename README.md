@@ -11,7 +11,7 @@ This copyright statement must be retained.
 
 本项目实现运行于 Raspberry Pi 5 的 USRP B210 DMR 数字转发器及本地触摸屏控制终端。系统接收 VHF/UHF DMR 信号，透明转发原始 DMR 帧到配置的 DMR 发射频点；可选接收带 CTCSS 的模拟 FM 信号，并以固定源 ID `9999`、全呼目标 ID `16777215` 转发为 DMR。程序同时记录通话音频为 MP3，并通过 UDP 向 GUI 提供实时运行状态和控制能力。
 
-当前应用版本：`V1.0.7 B154`。
+源码目标版本：`V1.1.0`。Pi5 当前已部署基线仍为 `V1.0.7 B154`；完成三档集成、构建和实机校准前不得把 V1.1.0 标记为已部署。
 
 ## 2. 源码目录
 
@@ -21,7 +21,7 @@ This copyright statement must be retained.
 - `SOURCE_STRUCTURE.md`：模块调用关系、各源文件职责和编译步骤。
 - `AGC_RSSI_RANGE_REPORT.md`：硬件 AGC、模拟增益补偿和 80dB RSSI 范围验收方法。
 - `B210_RX_GAIN_CHAIN_REPORT.md`：B210/AD9361 接收增益链、各级范围和软件控制边界。
-- `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md`：新契约的内部三档固定 Gain、-110..-20 dBm 校准链路、噪声扣除、削顶保护和定量验收方案。
+- `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md`：新契约的内部三档固定 Gain、-125..-20 dBm 校准链路、弱端12 dB SNR、噪声扣除、削顶保护和两/三档比较。
 - `WIDE_DYNAMIC_RANGE_RSSI_PROTECTION_DESIGN.md`：140dB输入范围的外部量程、绝对RSSI与强信号保护方案。
 - 工程根目录的 `CMakeLists.txt`、`cmake/`、`deploy/`、`gr-dmr/`、`test-vectors/` 是编译、部署及射频处理所需的配套文件，不在本目录重复保存。
 
@@ -39,7 +39,7 @@ This copyright statement must be retained.
 ### AGC 与 RSSI 校准契约
 
 - 新目标契约 CAL/RF/NET 1.0.0 要求校准和正常工作均关闭硬件 AGC，固定使用 low/medium/high 三档；软件数字 AGC 位于原始 RSSI/SNR测量之后，只服务解调。
-- 新校准点为 high `-110..-75`、medium `-85..-45`、low `-55..-20 dBm`，使用线性功率扣噪、单调分段线性拟合和削顶保护。旧两档说明仅保留作历史实现记录。
+- 新校准点为 high `-125..-75`（SNR >=12 dB）、medium `-85..-45`、low `-55..-20 dBm`，使用线性功率扣噪、单调分段线性拟合和削顶保护。默认保留三档；两档必须额外证明 high 单档约70 dB范围仍满足弱端SNR和强端无削顶。
 
 ### 网络与 GUI
 
@@ -157,6 +157,12 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 - 高档增益编辑值按 RX/档位独立保留，改变增益后清空对应旧点；启动校准时将当前显示增益写入 B210 并关闭硬件 AGC。
 - 重新排版 800x480 校准页面，将实时遥测、档位选择和增益控制分行显示，完整显示“低增益校准”“高增益校准”标题。
 - 修复切换到另一 RX 的未编辑高档列时继承上一 RX 临时增益的问题，各 RX/档位列保持独立。
+
+### V1.1.0 source target, 2026-08-16
+
+- 校准核心增加 low/medium/high 三档，点数为 8/9/11；high 扩展至 -125 dBm并要求匹配滤波后 SNR >=12 dB。
+- 校准顺序改为弱到强，稳定门限改为10个样本、0.8 dB跨度；YAML持久化和UDP `range`字段支持 medium。
+- 增加两档与三档定量比较；默认保留三档。该版本尚未完成Pi5构建和实机校准，不是已部署发布。
 
 ### V1.0.7 B154, 2026-08-15
 

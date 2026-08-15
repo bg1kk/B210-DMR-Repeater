@@ -197,6 +197,7 @@ std::string calibration_state_json(const CalibrationSession* session,
         out << ",\"session_id\":\"" << json_escape(session->id)
             << "\",\"rx_channel\":" << session->rx_channel
             << ",\"band\":\"" << dmr_rpt::to_string(session->band)
+            << "\",\"range\":\"" << dmr_rpt::to_string(session->band)
             << "\",\"rx_gain_tenths_db\":" << session->gain_tenths_db
             << ",\"completed_points\":" << count;
         if (session->next_input_index < required.size()) {
@@ -230,13 +231,17 @@ std::string calibration_curves_json(const dmr_rpt::RxSignalCalibrationConfig& co
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
         for (const auto band : {dmr_rpt::RxCalibrationBand::Low,
+                                dmr_rpt::RxCalibrationBand::Medium,
                                 dmr_rpt::RxCalibrationBand::High}) {
             const auto& curve = band == dmr_rpt::RxCalibrationBand::Low
-                ? config.low[index] : config.high[index];
+                ? config.low[index]
+                : band == dmr_rpt::RxCalibrationBand::Medium
+                    ? config.medium[index] : config.high[index];
             if (!first_curve) out << ',';
             first_curve = false;
             out << "{\"rx_channel\":" << channel
                 << ",\"band\":\"" << dmr_rpt::to_string(band) << "\""
+                << ",\"range\":\"" << dmr_rpt::to_string(band) << "\""
                 << ",\"rx_gain_tenths_db\":";
             if (curve.rx_gain_tenths_db) out << *curve.rx_gain_tenths_db;
             else out << "null";
@@ -792,7 +797,7 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                         command.calibration_band);
                     if (!band) {
                         set_calibration_state(calibration_state_json(
-                            nullptr, "error", "calibration_band must be low or high"));
+                            nullptr, "error", "calibration_band must be low, medium or high"));
                         continue;
                     }
                     if (!command.calibration_rx_gain_tenths_db ||
@@ -800,11 +805,11 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                         *command.calibration_rx_gain_tenths_db > 1000 ||
                         (*band == dmr_rpt::RxCalibrationBand::Low &&
                          *command.calibration_rx_gain_tenths_db != 0) ||
-                        (*band == dmr_rpt::RxCalibrationBand::High &&
+                        (*band != dmr_rpt::RxCalibrationBand::Low &&
                          *command.calibration_rx_gain_tenths_db <= 0)) {
                         set_calibration_state(calibration_state_json(
                             nullptr, "error",
-                            "low calibration requires 0 dB; high calibration requires positive RX gain"));
+                            "low calibration requires 0 dB; medium/high calibration requires positive RX gain"));
                         continue;
                     }
                     const int channel = *command.calibration_rx_channel;
@@ -883,13 +888,18 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(650));
                     const auto observation = calibration->stable_observation(
-                        calibration_session->rx_channel, 5U, monotonic_ms(),
-                        1000, 1.0);
+                        calibration_session->rx_channel, 10U, monotonic_ms(),
+                        2500, 0.8);
+                    const double minimum_snr_db =
+                        calibration_session->band ==
+                            dmr_rpt::RxCalibrationBand::High
+                        ? 12.0 : 10.0;
                     if (!observation || !observation->measured_dbfs ||
-                        !observation->snr_db) {
+                        !observation->snr_db ||
+                        *observation->snr_db < minimum_snr_db) {
                         set_calibration_state(calibration_state_json(
                             &*calibration_session, "signal_unstable",
-                            "five fresh samples within 1 dB are required"));
+                            "ten fresh samples within 0.8 dB and the range SNR threshold are required"));
                         continue;
                     }
                     calibration_session->curve.rx_gain_tenths_db =
@@ -918,13 +928,19 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                     continue;
                 }
                 dmr_rpt::RepeaterConfig candidate = validated.config;
-                auto& target = calibration_session->band ==
-                    dmr_rpt::RxCalibrationBand::Low
-                    ? candidate.radio.rx_signal_calibration.low[
-                        static_cast<std::size_t>(calibration_session->rx_channel)]
-                    : candidate.radio.rx_signal_calibration.high[
-                        static_cast<std::size_t>(calibration_session->rx_channel)];
-                target = calibration_session->curve;
+                const std::size_t calibration_channel = static_cast<std::size_t>(
+                    calibration_session->rx_channel);
+                if (calibration_session->band == dmr_rpt::RxCalibrationBand::Low) {
+                    candidate.radio.rx_signal_calibration.low[calibration_channel] =
+                        calibration_session->curve;
+                } else if (calibration_session->band ==
+                           dmr_rpt::RxCalibrationBand::Medium) {
+                    candidate.radio.rx_signal_calibration.medium[calibration_channel] =
+                        calibration_session->curve;
+                } else {
+                    candidate.radio.rx_signal_calibration.high[calibration_channel] =
+                        calibration_session->curve;
+                }
                 try {
                     dmr_rpt::persist_rx_signal_calibration(
                         config_path, candidate.radio.rx_signal_calibration);
@@ -940,7 +956,8 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                         << dmr_rpt::to_string(calibration_session->band)
                         << "\",\"rx_gain_tenths_db\":"
                         << calibration_session->gain_tenths_db
-                        << ",\"completed_points\":9}";
+                        << ",\"completed_points\":"
+                        << calibration_session->curve.points.size() << '}';
                     set_calibration_state(committed_state.str());
                     audit.emit({"CAL", "rx_calibration.committed", "commit",
                                 "ok", validated.semantic_sha256,

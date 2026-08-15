@@ -164,7 +164,7 @@ void test_udp_status_query()
                 result.accepted = true;
                 result.code = "ok";
                 result.state_json =
-                    "{\"repeater_version\":\"V1.0.7\","
+                    "{\"repeater_version\":\"V1.1.0\","
                     "\"build_sequence\":109}";
                 return result;
             }
@@ -349,7 +349,7 @@ void test_udp_status_query()
                 "{\"v\":1,\"id\":\"get-version\",\"op\":\"get_version\","
                 "\"token\":\"network-test-token\"}");
             const std::string version_response = receive_datagram(listener);
-            require(version_response.find("\"repeater_version\":\"V1.0.7\"") !=
+            require(version_response.find("\"repeater_version\":\"V1.1.0\"") !=
                         std::string::npos &&
                     version_response.find("\"build_sequence\":109") !=
                         std::string::npos,

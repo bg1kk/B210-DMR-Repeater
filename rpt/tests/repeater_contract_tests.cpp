@@ -552,19 +552,24 @@ void test_rx_signal_calibration()
 {
     const auto& low = dmr_rpt::rx_calibration_required_inputs(
         dmr_rpt::RxCalibrationBand::Low);
+    const auto& medium = dmr_rpt::rx_calibration_required_inputs(
+        dmr_rpt::RxCalibrationBand::Medium);
     const auto& high = dmr_rpt::rx_calibration_required_inputs(
         dmr_rpt::RxCalibrationBand::High);
-    require(low == std::vector<int>({0, -10, -20, -30, -40, -50, -60, -70, -80}),
-            "low calibration input ladder is 0 through -80 dBm");
-    require(high == std::vector<int>({-60, -70, -80, -90, -100, -110, -120,
-                                      -130, -140}),
-            "high calibration input ladder is -60 through -140 dBm");
+    require(low == std::vector<int>({-55, -50, -45, -40, -35, -30, -25, -20}),
+            "low calibration input ladder is -20 through -55 dBm");
+    require(medium == std::vector<int>({-85, -80, -75, -70, -65, -60, -55,
+                                        -50, -45}),
+            "medium calibration input ladder is -45 through -85 dBm");
+    require(high == std::vector<int>({-125, -120, -115, -110, -105, -100, -95,
+                                      -90, -85, -80, -75}),
+            "high calibration input ladder is -75 through -125 dBm");
 
     dmr_rpt::RxSignalCalibrationCurve low_curve;
     low_curve.rx_gain_tenths_db = 0;
     for (const int input_dbm : low) {
         low_curve.points.push_back(
-            {input_dbm, static_cast<double>(input_dbm) - 20.0, 5.0, {}});
+            {input_dbm, static_cast<double>(input_dbm) - 20.0, 10.0, {}});
     }
     require(dmr_rpt::rx_calibration_curve_complete(
                 low_curve, dmr_rpt::RxCalibrationBand::Low),
@@ -576,11 +581,21 @@ void test_rx_signal_calibration()
                 invalid_low, dmr_rpt::RxCalibrationBand::Low),
             "low calibration rejects non-zero RX gain");
 
+    dmr_rpt::RxSignalCalibrationCurve medium_curve;
+    medium_curve.rx_gain_tenths_db = 250;
+    for (const int input_dbm : medium) {
+        medium_curve.points.push_back(
+            {input_dbm, static_cast<double>(input_dbm) + 5.0, 10.0, {}});
+    }
+    require(dmr_rpt::rx_calibration_curve_complete(
+                medium_curve, dmr_rpt::RxCalibrationBand::Medium),
+            "complete medium calibration accepts a locked positive RX gain");
+
     dmr_rpt::RxSignalCalibrationCurve high_curve;
-    high_curve.rx_gain_tenths_db = 250;
+    high_curve.rx_gain_tenths_db = 500;
     for (const int input_dbm : high) {
         high_curve.points.push_back(
-            {input_dbm, static_cast<double>(input_dbm) + 5.0, 5.0, {}});
+            {input_dbm, static_cast<double>(input_dbm) + 30.0, 12.0, {}});
     }
     require(dmr_rpt::rx_calibration_curve_complete(
                 high_curve, dmr_rpt::RxCalibrationBand::High),
@@ -588,45 +603,39 @@ void test_rx_signal_calibration()
 
     dmr_rpt::RxSignalCalibrationConfig calibration;
     calibration.low[0] = low_curve;
+    calibration.medium[0] = medium_curve;
     calibration.high[0] = high_curve;
     const dmr_rpt::RxCalibrationReading low_reading =
-        dmr_rpt::rx_calibration_reading(calibration, 0, 0, -45.0);
+        dmr_rpt::rx_calibration_reading(calibration, 0, 0, -65.0);
     require(low_reading.calibrated && low_reading.rssi_dbm &&
-                std::abs(*low_reading.rssi_dbm + 25.0) < 0.001,
+                std::abs(*low_reading.rssi_dbm + 45.0) < 0.001,
             "low calibration interpolates measured dBFS into dBm");
     const dmr_rpt::RxCalibrationReading compensated =
-        dmr_rpt::rx_calibration_reading(calibration, 0, 200, -70.0);
+        dmr_rpt::rx_calibration_reading(calibration, 0, 450, -65.0);
     require(compensated.calibrated && compensated.rssi_dbm &&
-                std::abs(*compensated.rssi_dbm + 70.0) < 0.001 &&
+                std::abs(*compensated.rssi_dbm + 90.0) < 0.001 &&
                 compensated.reference_gain_tenths_db ==
-                    std::optional<std::int32_t>(250) &&
+                    std::optional<std::int32_t>(500) &&
                 compensated.gain_compensation_db ==
                     std::optional<double>(5.0) &&
                 compensated.compensated_dbfs ==
-                    std::optional<double>(-65.0),
+                    std::optional<double>(-60.0),
             "hardware AGC gain is translated to the nearest calibration gain");
     require(dmr_rpt::rx_calibration_reference_dbfs(
-                calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 250) ==
-                std::optional<double>(-65.0) &&
+                calibration, 0, dmr_rpt::RxCalibrationBand::High, -90, 500) ==
+                std::optional<double>(-60.0) &&
                 dmr_rpt::rx_calibration_reference_dbfs(
-                    calibration, 0, dmr_rpt::RxCalibrationBand::Low, -60, 0) ==
-                    std::optional<double>(-80.0) &&
+                    calibration, 0, dmr_rpt::RxCalibrationBand::Low, -50, 0) ==
+                    std::optional<double>(-70.0) &&
                 !dmr_rpt::rx_calibration_reference_dbfs(
-                    calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 0),
+                    calibration, 0, dmr_rpt::RxCalibrationBand::High, -90, 0),
             "calibration exposes only matching-gain automatic-switch anchors");
 
-    for (int input_dbm = 0; input_dbm >= -80; input_dbm -= 5) {
-        for (const std::int32_t gain_tenths_db : {0, 100, 200}) {
-            const double measured_dbfs = static_cast<double>(input_dbm) - 20.0 +
-                gain_tenths_db / 10.0;
-            const dmr_rpt::RxCalibrationReading reading =
-                dmr_rpt::rx_calibration_reading(
-                    calibration, 0, gain_tenths_db, measured_dbfs);
-            require(reading.calibrated && reading.rssi_dbm &&
-                        std::abs(*reading.rssi_dbm - input_dbm) < 0.001,
-                    "gain compensation preserves the 80 dB low-band scale");
-        }
-    }
+    dmr_rpt::RxSignalCalibrationCurve weak_high = high_curve;
+    weak_high.points.front().snr_db = 11.9;
+    require(!dmr_rpt::rx_calibration_curve_complete(
+                weak_high, dmr_rpt::RxCalibrationBand::High),
+            "high calibration rejects SNR below 12 dB");
 
     dmr_rpt::RxSignalCalibrationRuntime runtime(calibration);
     for (int index = 0; index < 5; ++index) {

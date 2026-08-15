@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -22,7 +23,8 @@ void require(bool condition, const std::string& message)
 }
 
 dmr_rpt::RxSignalCalibrationCurve make_curve(
-    dmr_rpt::RxCalibrationBand band, std::int32_t gain_tenths_db)
+    dmr_rpt::RxCalibrationBand band, std::int32_t gain_tenths_db,
+    double snr_db = 20.0)
 {
     dmr_rpt::RxSignalCalibrationCurve curve;
     curve.rx_gain_tenths_db = gain_tenths_db;
@@ -30,38 +32,50 @@ dmr_rpt::RxSignalCalibrationCurve make_curve(
         curve.points.push_back({
             input_dbm,
             static_cast<double>(input_dbm) - 20.0 + gain_tenths_db / 10.0,
-            20.0,
+            snr_db,
             {}});
     }
     return curve;
 }
 
-void test_gain_compensation_over_80_db()
+void test_three_range_calibration()
 {
     dmr_rpt::RxSignalCalibrationConfig config;
     config.low[0] = make_curve(dmr_rpt::RxCalibrationBand::Low, 0);
-    config.high[0] = make_curve(dmr_rpt::RxCalibrationBand::High, 250);
+    config.medium[0] = make_curve(dmr_rpt::RxCalibrationBand::Medium, 250);
+    config.high[0] = make_curve(dmr_rpt::RxCalibrationBand::High, 500);
 
-    for (int input_dbm = 0; input_dbm >= -80; input_dbm -= 5) {
-        for (const std::int32_t gain_tenths_db : {0, 100, 200}) {
-            const double measured_dbfs = static_cast<double>(input_dbm) - 20.0 +
-                gain_tenths_db / 10.0;
-            const dmr_rpt::RxCalibrationReading reading =
-                dmr_rpt::rx_calibration_reading(
-                    config, 0, gain_tenths_db, measured_dbfs);
-            require(reading.calibrated && reading.rssi_dbm,
-                    "gain-compensated reading is unavailable");
-            require(std::abs(*reading.rssi_dbm - input_dbm) < 0.001,
-                    "gain compensation changed the RSSI scale");
-        }
+    require(dmr_rpt::rx_calibration_required_inputs(
+                dmr_rpt::RxCalibrationBand::High).front() == -125 &&
+            dmr_rpt::rx_calibration_required_inputs(
+                dmr_rpt::RxCalibrationBand::High).back() == -75 &&
+            dmr_rpt::rx_calibration_required_inputs(
+                dmr_rpt::RxCalibrationBand::High).size() == 11U,
+            "high range must cover -125 through -75 dBm");
+    require(dmr_rpt::rx_calibration_curve_complete(
+                config.low[0], dmr_rpt::RxCalibrationBand::Low) &&
+            dmr_rpt::rx_calibration_curve_complete(
+                config.medium[0], dmr_rpt::RxCalibrationBand::Medium) &&
+            dmr_rpt::rx_calibration_curve_complete(
+                config.high[0], dmr_rpt::RxCalibrationBand::High),
+            "all three calibrated ranges must be complete");
+
+    for (const auto item : {std::pair<int, std::int32_t>{-20, 0},
+                            {-65, 250}, {-125, 500}}) {
+        const double measured_dbfs = static_cast<double>(item.first) - 20.0 +
+            item.second / 10.0;
+        const auto reading = dmr_rpt::rx_calibration_reading(
+            config, 0, item.second, measured_dbfs);
+        require(reading.calibrated && reading.rssi_dbm,
+                "three-range reading is unavailable");
+        require(std::abs(*reading.rssi_dbm - item.first) < 0.001,
+                "three-range reading changed the RSSI scale");
     }
 
-    const dmr_rpt::RxCalibrationReading nearest =
-        dmr_rpt::rx_calibration_reading(config, 0, 200, -70.0);
-    require(nearest.reference_gain_tenths_db ==
-                std::optional<std::int32_t>(250) &&
-                nearest.gain_compensation_db == std::optional<double>(5.0),
-            "nearest reference gain was not selected");
+    auto weak_snr = make_curve(dmr_rpt::RxCalibrationBand::High, 500, 11.9);
+    require(!dmr_rpt::rx_calibration_curve_complete(
+                weak_snr, dmr_rpt::RxCalibrationBand::High),
+            "high range must reject SNR below 12 dB");
 }
 
 } // namespace
@@ -69,7 +83,7 @@ void test_gain_compensation_over_80_db()
 int main()
 {
     try {
-        test_gain_compensation_over_80_db();
+        test_three_range_calibration();
         std::cout << "RX signal calibration tests passed\n";
         return 0;
     } catch (const std::exception& error) {

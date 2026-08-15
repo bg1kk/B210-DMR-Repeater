@@ -14,8 +14,10 @@
 namespace dmr_rpt {
 namespace {
 
-const std::vector<int> kLowInputs{0, -10, -20, -30, -40, -50, -60, -70, -80};
-const std::vector<int> kHighInputs{-60, -70, -80, -90, -100, -110, -120, -130, -140};
+const std::vector<int> kLowInputs{-55, -50, -45, -40, -35, -30, -25, -20};
+const std::vector<int> kMediumInputs{-85, -80, -75, -70, -65, -60, -55, -50, -45};
+const std::vector<int> kHighInputs{
+    -125, -120, -115, -110, -105, -100, -95, -90, -85, -80, -75};
 
 const RxSignalCalibrationCurve* curve_for(const RxSignalCalibrationConfig& config,
                                           int rx_channel,
@@ -25,8 +27,9 @@ const RxSignalCalibrationCurve* curve_for(const RxSignalCalibrationConfig& confi
         return nullptr;
     }
     const std::size_t index = static_cast<std::size_t>(rx_channel);
-    return band == RxCalibrationBand::Low ? &config.low[index]
-                                           : &config.high[index];
+    if (band == RxCalibrationBand::Low) return &config.low[index];
+    if (band == RxCalibrationBand::Medium) return &config.medium[index];
+    return &config.high[index];
 }
 
 std::optional<double> interpolate(const RxSignalCalibrationCurve& curve,
@@ -62,20 +65,25 @@ std::optional<double> interpolate(const RxSignalCalibrationCurve& curve,
 
 const char* to_string(RxCalibrationBand band)
 {
-    return band == RxCalibrationBand::Low ? "low" : "high";
+    if (band == RxCalibrationBand::Low) return "low";
+    if (band == RxCalibrationBand::Medium) return "medium";
+    return "high";
 }
 
 std::optional<RxCalibrationBand> rx_calibration_band_from_string(
     const std::string& value)
 {
     if (value == "low") return RxCalibrationBand::Low;
+    if (value == "medium") return RxCalibrationBand::Medium;
     if (value == "high") return RxCalibrationBand::High;
     return std::nullopt;
 }
 
 const std::vector<int>& rx_calibration_required_inputs(RxCalibrationBand band)
 {
-    return band == RxCalibrationBand::Low ? kLowInputs : kHighInputs;
+    if (band == RxCalibrationBand::Low) return kLowInputs;
+    if (band == RxCalibrationBand::Medium) return kMediumInputs;
+    return kHighInputs;
 }
 
 bool rx_calibration_curve_complete(const RxSignalCalibrationCurve& curve,
@@ -86,22 +94,25 @@ bool rx_calibration_curve_complete(const RxSignalCalibrationCurve& curve,
         return false;
     }
     if ((band == RxCalibrationBand::Low && *curve.rx_gain_tenths_db != 0) ||
-        (band == RxCalibrationBand::High && *curve.rx_gain_tenths_db <= 0)) {
+        ((band == RxCalibrationBand::Medium || band == RxCalibrationBand::High) &&
+         *curve.rx_gain_tenths_db <= 0)) {
         return false;
     }
     std::vector<RxSignalCalibrationPoint> points = curve.points;
     std::sort(points.begin(), points.end(),
               [](const auto& left, const auto& right) {
-                  return left.input_dbm > right.input_dbm;
+                  return left.input_dbm < right.input_dbm;
               });
     std::set<int> inputs;
-    double previous_dbfs = std::numeric_limits<double>::infinity();
+    double previous_dbfs = -std::numeric_limits<double>::infinity();
     for (std::size_t index = 0; index < points.size(); ++index) {
         const auto& point = points[index];
+        const double minimum_snr_db = band == RxCalibrationBand::High ? 12.0 : 10.0;
         if (!std::isfinite(point.measured_dbfs) || !std::isfinite(point.snr_db) ||
+            point.snr_db < minimum_snr_db ||
             point.input_dbm != rx_calibration_required_inputs(band)[index] ||
             !inputs.insert(point.input_dbm).second ||
-            point.measured_dbfs >= previous_dbfs) {
+            point.measured_dbfs <= previous_dbfs) {
             return false;
         }
         previous_dbfs = point.measured_dbfs;
@@ -139,6 +150,7 @@ RxCalibrationReading rx_calibration_reading(
     }
     std::optional<double> best_gain_distance_db;
     for (const RxCalibrationBand band : {RxCalibrationBand::Low,
+                                         RxCalibrationBand::Medium,
                                          RxCalibrationBand::High}) {
         const RxSignalCalibrationCurve* curve = curve_for(config, rx_channel, band);
         if (!curve || !curve->rx_gain_tenths_db ||
@@ -211,7 +223,7 @@ void RxSignalCalibrationRuntime::observe(
     auto& history = observations_[static_cast<std::size_t>(rx_channel)];
     history.push_back({rx_gain_tenths_db, measured_dbfs, noise_dbfs,
                        snr_db, observed_at_ms, receiving});
-    while (history.size() > 5U) {
+    while (history.size() > 10U) {
         history.pop_front();
     }
 }

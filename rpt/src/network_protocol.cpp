@@ -277,8 +277,8 @@ std::optional<NetworkControlCommand> parse_command(const std::string& body)
     command.listen_port = json_integer_field<int>(body, "listen_port");
     command.calibration_rx_channel =
         json_integer_field<int>(body, "rx_channel");
-    command.calibration_band =
-        json_string_field(body, "calibration_band").value_or("");
+    command.calibration_band = json_string_field(body, "range").value_or(
+        json_string_field(body, "calibration_band").value_or(""));
     command.calibration_session_id =
         json_string_field(body, "session_id").value_or("");
     command.calibration_input_dbm =

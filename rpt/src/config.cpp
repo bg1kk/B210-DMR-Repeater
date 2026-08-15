@@ -444,6 +444,8 @@ RxSignalCalibrationConfig parse_rx_signal_calibration(const YAML::Node& radio)
         const std::size_t index = static_cast<std::size_t>(channel);
         calibration.low[index] = parse_rx_calibration_curve(
             receiver["low"], "radio.rx_signal_calibration." + name + ".low");
+        calibration.medium[index] = parse_rx_calibration_curve(
+            receiver["medium"], "radio.rx_signal_calibration." + name + ".medium");
         calibration.high[index] = parse_rx_calibration_curve(
             receiver["high"], "radio.rx_signal_calibration." + name + ".high");
     }
@@ -1073,10 +1075,12 @@ void persist_rx_signal_calibration(
             YAML::Node receiver(YAML::NodeType::Map);
             const std::size_t index = static_cast<std::size_t>(channel);
             for (const auto band : {RxCalibrationBand::Low,
+                                    RxCalibrationBand::Medium,
                                     RxCalibrationBand::High}) {
                 const RxSignalCalibrationCurve& curve =
-                    band == RxCalibrationBand::Low
-                        ? calibration.low[index] : calibration.high[index];
+                    band == RxCalibrationBand::Low ? calibration.low[index] :
+                    band == RxCalibrationBand::Medium ? calibration.medium[index] :
+                    calibration.high[index];
                 RxSignalCalibrationCurve fitted = curve;
                 fit_rx_signal_calibration_curve(fitted);
                 YAML::Node curve_node(YAML::NodeType::Map);
@@ -1244,11 +1248,14 @@ ValidatedConfig validate_config(const RepeaterConfig& config)
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
         for (const auto band : {RxCalibrationBand::Low,
+                                RxCalibrationBand::Medium,
                                 RxCalibrationBand::High}) {
             const RxSignalCalibrationCurve& curve =
                 band == RxCalibrationBand::Low
                     ? config.radio.rx_signal_calibration.low[index]
-                    : config.radio.rx_signal_calibration.high[index];
+                    : band == RxCalibrationBand::Medium
+                        ? config.radio.rx_signal_calibration.medium[index]
+                        : config.radio.rx_signal_calibration.high[index];
             if (!curve.points.empty() &&
                 !rx_calibration_curve_complete(curve, band)) {
                 throw ConfigError("radio.rx_signal_calibration curve is incomplete or invalid");
@@ -1488,11 +1495,14 @@ std::string canonical_config_summary(const RepeaterConfig& config)
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
         for (const auto band : {RxCalibrationBand::Low,
+                                RxCalibrationBand::Medium,
                                 RxCalibrationBand::High}) {
             const RxSignalCalibrationCurve& curve =
                 band == RxCalibrationBand::Low
                     ? config.radio.rx_signal_calibration.low[index]
-                    : config.radio.rx_signal_calibration.high[index];
+                    : band == RxCalibrationBand::Medium
+                        ? config.radio.rx_signal_calibration.medium[index]
+                        : config.radio.rx_signal_calibration.high[index];
             out << "radio.rx_signal_calibration.rx" << channel + 1 << '.'
                 << to_string(band) << '=';
             if (curve.rx_gain_tenths_db) {

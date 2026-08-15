@@ -15,7 +15,7 @@
 
 namespace dmr_rpt {
 
-enum class RxCalibrationBand { Low, High };
+enum class RxCalibrationBand { Low, Medium, High };
 
 struct RxSignalCalibrationPoint {
     int input_dbm = 0;
@@ -39,6 +39,7 @@ struct RxSignalCalibrationCurve {
 
 struct RxSignalCalibrationConfig {
     std::array<RxSignalCalibrationCurve, 2> low;
+    std::array<RxSignalCalibrationCurve, 2> medium;
     std::array<RxSignalCalibrationCurve, 2> high;
 };
 
