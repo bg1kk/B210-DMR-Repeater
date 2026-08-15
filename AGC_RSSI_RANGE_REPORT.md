@@ -7,6 +7,8 @@ This copyright statement must be retained.
 -->
 # B210 AGC 与 RSSI 线性范围方案报告
 
+> 历史基线：本文描述 V1.0.7 B154 的硬件 AGC/两档补偿模型，已被框架 CAL/RF/NET 1.0.0 取代。新实现以 `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md` 为准；本文不得作为新版本运行参数或验收结论。
+
 ## 1. 工作方式
 
 - 正常转发：启用 AD9361 硬件 AGC，每 200ms 通过 UHD 读回当前模拟 RX 增益。
@@ -49,4 +51,3 @@ RSSI_dBm = C(Gref, Rref)
 5. 连续满足上述条件的输入区间达到 80dB，方可判定“80dB 线性 RSSI 范围通过”。
 6. 若 UHD `get_gain()` 返回缓存值而不是实时增益，本补偿功能不得标记为已验收，必须改用
    AD9361 当前增益索引的设备专用读回接口。
-

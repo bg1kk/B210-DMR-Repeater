@@ -15,7 +15,8 @@ This copyright statement must be retained.
 source/
   CMakeLists.txt             独立 CMake 构建入口
   VERSION                    应用版本号
-  AGC_RSSI_RANGE_REPORT.md   AGC 补偿与 RSSI 范围报告
+  AGC_RSSI_RANGE_REPORT.md   历史 AGC 补偿与 RSSI 范围报告
+  INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md 新契约三档 RSSI 校准实施方案
   B210_RX_GAIN_CHAIN_REPORT.md B210/AD9361 接收增益链报告
   WIDE_DYNAMIC_RANGE_RSSI_PROTECTION_DESIGN.md 宽动态RSSI与强信号保护方案
   rpt/                       转发器和 DMR 信号处理源码
@@ -68,14 +69,14 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | `hardware_runtime.h` | GNU Radio/UHD 硬件会话和转发运行时工厂。 |
 | `interlock.h` | 发射互锁、呼叫生命周期和超时控制接口。 |
 | `io_status.h` | RX/TX 状态、RSSI、SNR、增益等状态快照。 |
-| `network_protocol.h` | UDP 命令、状态编码和远程控制协议接口；包括 RX 硬件 AGC 状态、模拟增益和软件 AGC 遥测。 |
-| `receive_agc.h` | 接收增益闭环控制规则。 |
+| `network_protocol.h` | UDP 命令、状态编码和远程控制协议接口；目标版本包括三档固定 Gain、削顶状态和校准协议/2。 |
+| `receive_agc.h` | 软件数字 AGC 控制规则；目标版本另由固定三档 RangeController 管理硬件模拟 Gain。 |
 | `receive_signal_metrics.h` | dBFS、SNR 和 200 ms 平均信号强度统计。 |
 | `recording.h` | 录音命名、记录元数据和录音会话接口。 |
 | `remote_voice.h` | 远程 AMBE 语音控制与网络帧接口。 |
 | `rf_session.h` | RF 发射/接收通道配置和实际 B210 会话接口。 |
 | `router.h` | DMR 与 FM 业务路由、目标判定和转发决策接口。 |
-| `rx_signal_calibration.h` | dBFS 到 dBm 的校准点、曲线拟合和持久化接口。 |
+| `rx_signal_calibration.h` | dBFS 到 dBm 的三档校准点、噪声扣除、单调分段拟合和持久化接口。 |
 | `sha256.h` | 测试向量和清单完整性校验接口。 |
 | `short_message.h` | DMR 短消息提取、构造和转发接口。 |
 | `vector_manifest.h` | 测试向量 manifest 解析及硬件档案校验接口。 |
