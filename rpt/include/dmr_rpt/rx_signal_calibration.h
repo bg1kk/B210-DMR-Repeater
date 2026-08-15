@@ -45,6 +45,9 @@ struct RxSignalCalibrationConfig {
 struct RxCalibrationReading {
     std::optional<double> rssi_dbm;
     bool calibrated = false;
+    std::optional<std::int32_t> reference_gain_tenths_db;
+    std::optional<double> gain_compensation_db;
+    std::optional<double> compensated_dbfs;
 };
 
 struct RxCalibrationObservation {

@@ -2110,6 +2110,17 @@ public:
                     afm_stream_channel);
             });
         }
+        uhd_step("enable B210 RX hardware AGC", [&] {
+            source_->set_rx_agc(true, rx_stream_channel);
+            if (afm_enabled) source_->set_rx_agc(true, afm_stream_channel);
+        });
+        {
+            std::lock_guard<std::mutex> lock(rx_config_mutex_);
+            rx_hardware_agc_enabled_[rx.channel] = true;
+            if (afm_enabled) {
+                rx_hardware_agc_enabled_[afm.rx.channel] = true;
+            }
+        }
 
         gpio_ = std::make_unique<GnuradioB210GpioAdapter>(source_);
         io_ = std::make_unique<RuntimeIo>(rf.io_status, *gpio_);
@@ -2205,9 +2216,14 @@ public:
                 status.receiving = receiving;
                 status.rssi_dbfs = snapshot.signal_dbfs;
                 status.rssi_dbm = reading.rssi_dbm;
+                status.rssi_gain_compensation_db =
+                    reading.gain_compensation_db;
                 status.snr_db = snapshot.snr_db;
                 status.calibration_state = reading.calibrated
                     ? "calibrated" : "uncalibrated";
+                annotate_receive_gain(status, physical_channel,
+                                       fm ? fm_agc_telemetry_ :
+                                           dmr_agc_telemetry_);
                 status.active_call_state_known = true;
                 if (receiving) {
                     status.active_call = NetworkReceiveCall{
@@ -2409,9 +2425,12 @@ public:
                         *snapshot.signal_dbfs >= threshold_dbfs;
                     status.rssi_dbfs = snapshot.signal_dbfs;
                     status.rssi_dbm = reading.rssi_dbm;
+                    status.rssi_gain_compensation_db =
+                        reading.gain_compensation_db;
                     status.snr_db = snapshot.snr_db;
                     status.calibration_state = reading.calibrated
                         ? "calibrated" : "uncalibrated";
+                    annotate_receive_gain(status, channel, dmr_agc_telemetry_);
                     network_->observe_receive_status(status);
                 }
             });
@@ -2458,9 +2477,13 @@ public:
                             *snapshot.signal_dbfs >= threshold_dbfs;
                         status.rssi_dbfs = snapshot.signal_dbfs;
                         status.rssi_dbm = reading.rssi_dbm;
+                        status.rssi_gain_compensation_db =
+                            reading.gain_compensation_db;
                         status.snr_db = snapshot.snr_db;
                         status.calibration_state = reading.calibrated
                             ? "calibrated" : "uncalibrated";
+                        annotate_receive_gain(status, channel,
+                                               fm_agc_telemetry_);
                         network_->observe_receive_status(status);
                     }
                 });
@@ -2588,6 +2611,7 @@ public:
         if (io_) {
             io_->poll(now_ms);
         }
+        refresh_hardware_rx_gains(now_ms);
         if (now_ms - last_agc_audit_at_ms_ < 1000) {
             return;
         }
@@ -2645,7 +2669,31 @@ public:
             source_->set_gain(requested, stream->second);
             const double applied = source_->get_gain(stream->second);
             require_precision(requested, applied, 0.05, "RX gain");
-            rx_gain_tenths_db_[physical_rx_channel] = gain_tenths_db;
+            rx_gain_tenths_db_[physical_rx_channel] = static_cast<std::int32_t>(
+                std::lround(applied * 10.0));
+            rx_hardware_agc_enabled_[physical_rx_channel] = false;
+            return true;
+        } catch (const std::exception& exception) {
+            error = exception.what();
+            return false;
+        }
+    }
+
+    bool set_rx_hardware_agc(int physical_rx_channel, bool enabled,
+                             std::string& error) override
+    {
+        std::lock_guard<std::mutex> lock(rx_config_mutex_);
+        const auto stream = rx_stream_channels_.find(physical_rx_channel);
+        if (!source_ || stream == rx_stream_channels_.end()) {
+            error = "RX channel is not active";
+            return false;
+        }
+        try {
+            source_->set_rx_agc(enabled, stream->second);
+            rx_hardware_agc_enabled_[physical_rx_channel] = enabled;
+            rx_gain_tenths_db_[physical_rx_channel] =
+                static_cast<std::int32_t>(std::lround(
+                    source_->get_gain(stream->second) * 10.0));
             return true;
         } catch (const std::exception& exception) {
             error = exception.what();
@@ -2661,11 +2709,66 @@ public:
     }
 
 private:
+    void annotate_receive_gain(
+        ReceiveStatus& status, int physical_rx_channel,
+        const std::shared_ptr<ReceiveAgcTelemetry>& telemetry) const
+    {
+        status.hardware_agc_enabled =
+            current_rx_hardware_agc_enabled(physical_rx_channel);
+        status.analog_gain_db = current_rx_gain(physical_rx_channel) / 10.0;
+        if (!telemetry) {
+            return;
+        }
+        const int input_tenths_dbfs = telemetry->input_tenths_dbfs.load(
+            std::memory_order_relaxed);
+        if (input_tenths_dbfs > -1999) {
+            status.agc_input_dbfs = input_tenths_dbfs / 10.0;
+        }
+        status.software_agc_gain_db = telemetry->gain_tenths_db.load(
+            std::memory_order_relaxed) / 10.0;
+    }
+
     std::int32_t current_rx_gain(int physical_rx_channel) const
     {
         std::lock_guard<std::mutex> lock(rx_config_mutex_);
         const auto found = rx_gain_tenths_db_.find(physical_rx_channel);
         return found == rx_gain_tenths_db_.end() ? 0 : found->second;
+    }
+
+    bool current_rx_hardware_agc_enabled(int physical_rx_channel) const
+    {
+        std::lock_guard<std::mutex> lock(rx_config_mutex_);
+        const auto found = rx_hardware_agc_enabled_.find(physical_rx_channel);
+        return found != rx_hardware_agc_enabled_.end() && found->second;
+    }
+
+    void refresh_hardware_rx_gains(std::int64_t now_ms)
+    {
+        if (!source_ || now_ms - last_hardware_gain_read_at_ms_ < 200) {
+            return;
+        }
+        last_hardware_gain_read_at_ms_ = now_ms;
+        std::vector<std::pair<int, std::size_t>> active_streams;
+        {
+            std::lock_guard<std::mutex> lock(rx_config_mutex_);
+            active_streams.assign(rx_stream_channels_.begin(),
+                                  rx_stream_channels_.end());
+        }
+        for (const auto& [physical_channel, stream_channel] : active_streams) {
+            try {
+                const auto gain_tenths_db = static_cast<std::int32_t>(
+                    std::lround(source_->get_gain(stream_channel) * 10.0));
+                std::lock_guard<std::mutex> lock(rx_config_mutex_);
+                rx_gain_tenths_db_[physical_channel] = gain_tenths_db;
+            } catch (const std::exception& exception) {
+                if (now_ms - last_hardware_gain_error_at_ms_ >= 1000) {
+                    last_hardware_gain_error_at_ms_ = now_ms;
+                    audit_.emit({"RF", "rf_hardware_agc.read_failed", "monitor",
+                                 "failed", config_.semantic_sha256,
+                                 {{"error", exception.what()}}});
+                }
+            }
+        }
     }
 
     void handle_recording_notice(const RecordingNotice& notice)
@@ -2721,10 +2824,13 @@ private:
     mutable std::mutex rx_config_mutex_;
     std::map<int, std::size_t> rx_stream_channels_;
     std::map<int, std::int32_t> rx_gain_tenths_db_;
+    std::map<int, bool> rx_hardware_agc_enabled_;
     std::mutex recording_console_mutex_;
     bool rx_diagnostic_ = false;
     bool running_ = false;
     std::int64_t last_agc_audit_at_ms_ = 0;
+    std::int64_t last_hardware_gain_read_at_ms_ = 0;
+    std::int64_t last_hardware_gain_error_at_ms_ = -1000;
 };
 
 } // namespace

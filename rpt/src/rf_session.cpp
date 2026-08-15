@@ -110,6 +110,16 @@ bool RfReinitializationController::set_rx_gain(
     return current_->set_rx_gain(physical_rx_channel, gain_tenths_db, error);
 }
 
+bool RfReinitializationController::set_rx_hardware_agc(
+    int physical_rx_channel, bool enabled, std::string& error)
+{
+    if (!current_) {
+        error = "RF session is stopped";
+        return false;
+    }
+    return current_->set_rx_hardware_agc(physical_rx_channel, enabled, error);
+}
+
 std::optional<RxCalibrationObservation>
 RfReinitializationController::calibration_observation(
     int physical_rx_channel) const

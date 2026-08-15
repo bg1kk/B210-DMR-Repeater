@@ -126,6 +126,16 @@ if(DMR_B210_SOURCE_BUILD_RPT)
             target_link_libraries(${test_name} PRIVATE dmr_b210_repeater_core)
         endforeach()
         add_test(NAME network_protocol_tests COMMAND network_protocol_tests)
+        add_executable(rx_signal_calibration_tests
+            rpt/tests/rx_signal_calibration_tests.cpp
+            rpt/src/rx_signal_calibration.cpp)
+        target_compile_features(rx_signal_calibration_tests PRIVATE cxx_std_17)
+        target_include_directories(rx_signal_calibration_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/rpt/include)
+        target_compile_options(rx_signal_calibration_tests PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME rx_signal_calibration_tests
+            COMMAND rx_signal_calibration_tests)
         if(EXISTS "${DMR_B210_REPEATER_EXAMPLE_CONFIG}" AND
            IS_DIRECTORY "${DMR_B210_REPEATER_VECTOR_ROOT}")
             add_test(NAME repeater_contract_tests

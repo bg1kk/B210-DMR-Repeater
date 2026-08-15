@@ -787,6 +787,14 @@ struct UdpControlServer::Impl {
                 ? status.status.snr_db : std::nullopt;
             const std::optional<double> rssi_dbm = fresh
                 ? status.status.rssi_dbm : std::nullopt;
+            const std::optional<double> analog_gain_db = fresh
+                ? status.status.analog_gain_db : std::nullopt;
+            const std::optional<double> software_agc_gain_db = fresh
+                ? status.status.software_agc_gain_db : std::nullopt;
+            const std::optional<double> agc_input_dbfs = fresh
+                ? status.status.agc_input_dbfs : std::nullopt;
+            const std::optional<double> rssi_gain_compensation_db = fresh
+                ? status.status.rssi_gain_compensation_db : std::nullopt;
             if (!first) {
                 out << ',';
             }
@@ -796,6 +804,16 @@ struct UdpControlServer::Impl {
                 << ",\"rssi_dbfs\":" << optional_double_json(rssi)
                 << ",\"rssi_dbm\":" << optional_double_json(rssi_dbm)
                 << ",\"snr_db\":" << optional_double_json(snr)
+                << ",\"hardware_agc_enabled\":"
+                << (status.status.hardware_agc_enabled ? "true" : "false")
+                << ",\"analog_gain_db\":"
+                << optional_double_json(analog_gain_db)
+                << ",\"software_agc_gain_db\":"
+                << optional_double_json(software_agc_gain_db)
+                << ",\"agc_input_dbfs\":"
+                << optional_double_json(agc_input_dbfs)
+                << ",\"rssi_gain_compensation_db\":"
+                << optional_double_json(rssi_gain_compensation_db)
                 << ",\"receiver_mode\":"
                 << json_string(status.status.receiver_mode)
                 << ",\"calibration_state\":"

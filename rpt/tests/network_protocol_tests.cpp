@@ -203,6 +203,11 @@ void test_udp_status_query()
         try {
             dmr_rpt::ReceiveStatus dmr_call_status{
                 0, "dmr", true, -60.0, 30.0};
+            dmr_call_status.hardware_agc_enabled = true;
+            dmr_call_status.analog_gain_db = 25.0;
+            dmr_call_status.software_agc_gain_db = 6.5;
+            dmr_call_status.agc_input_dbfs = -61.2;
+            dmr_call_status.rssi_gain_compensation_db = -5.0;
             dmr_call_status.active_call = {
                 100103, 100102, "group"};
             dmr_call_status.active_call_state_known = true;
@@ -228,8 +233,7 @@ void test_udp_status_query()
             const auto deadline = std::chrono::steady_clock::now() +
                 std::chrono::milliseconds(1200);
             while (std::chrono::steady_clock::now() < deadline) {
-                service.observe_receive_status({
-                    0, "dmr", true, -60.0, 30.0});
+                service.observe_receive_status(dmr_call_status);
                 service.observe_receive_status({
                     1, "fm", false, -90.0, 0.0});
                 const std::string frame = receive_datagram(listener);
@@ -247,6 +251,16 @@ void test_udp_status_query()
                             frame.find("\"rssi_dbfs\":-60.00") !=
                                 std::string::npos &&
                             frame.find("\"snr_db\":30.00") !=
+                                std::string::npos &&
+                            frame.find("\"hardware_agc_enabled\":true") !=
+                                std::string::npos &&
+                            frame.find("\"analog_gain_db\":25.00") !=
+                                std::string::npos &&
+                            frame.find("\"software_agc_gain_db\":6.50") !=
+                                std::string::npos &&
+                            frame.find("\"agc_input_dbfs\":-61.20") !=
+                                std::string::npos &&
+                            frame.find("\"rssi_gain_compensation_db\":-5.00") !=
                                 std::string::npos &&
                             frame.find("\"receiver_mode\":\"dmr\"") !=
                                 std::string::npos &&

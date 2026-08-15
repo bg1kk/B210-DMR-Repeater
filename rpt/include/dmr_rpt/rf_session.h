@@ -35,6 +35,14 @@ public:
         error = "RX gain control is unavailable";
         return false;
     }
+    virtual bool set_rx_hardware_agc(int physical_rx_channel, bool enabled,
+                                     std::string& error)
+    {
+        (void)physical_rx_channel;
+        (void)enabled;
+        error = "RX hardware AGC control is unavailable";
+        return false;
+    }
     virtual std::optional<RxCalibrationObservation>
     calibration_observation(int physical_rx_channel) const
     {
@@ -69,6 +77,8 @@ public:
     bool running() const;
     bool set_rx_gain(int physical_rx_channel, std::int32_t gain_tenths_db,
                      std::string& error);
+    bool set_rx_hardware_agc(int physical_rx_channel, bool enabled,
+                             std::string& error);
     std::optional<RxCalibrationObservation>
     calibration_observation(int physical_rx_channel) const;
 

@@ -137,18 +137,29 @@ RxCalibrationReading rx_calibration_reading(
     if (!rssi_dbfs || !std::isfinite(*rssi_dbfs)) {
         return result;
     }
+    std::optional<double> best_gain_distance_db;
     for (const RxCalibrationBand band : {RxCalibrationBand::Low,
                                          RxCalibrationBand::High}) {
         const RxSignalCalibrationCurve* curve = curve_for(config, rx_channel, band);
         if (!curve || !curve->rx_gain_tenths_db ||
-            *curve->rx_gain_tenths_db != rx_gain_tenths_db ||
             !rx_calibration_curve_complete(*curve, band)) {
             continue;
         }
-        if (const auto dbm = interpolate(*curve, *rssi_dbfs)) {
-            result.rssi_dbm = *dbm;
-            result.calibrated = true;
-            return result;
+        const double gain_compensation_db =
+            (*curve->rx_gain_tenths_db - rx_gain_tenths_db) / 10.0;
+        const double compensated_dbfs = *rssi_dbfs + gain_compensation_db;
+        if (const auto dbm = interpolate(*curve, compensated_dbfs)) {
+            const double gain_distance_db = std::abs(gain_compensation_db);
+            if (!best_gain_distance_db ||
+                gain_distance_db < *best_gain_distance_db) {
+                best_gain_distance_db = gain_distance_db;
+                result.rssi_dbm = *dbm;
+                result.calibrated = true;
+                result.reference_gain_tenths_db =
+                    *curve->rx_gain_tenths_db;
+                result.gain_compensation_db = gain_compensation_db;
+                result.compensated_dbfs = compensated_dbfs;
+            }
         }
     }
     return result;

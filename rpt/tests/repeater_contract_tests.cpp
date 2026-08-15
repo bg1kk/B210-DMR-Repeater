@@ -580,7 +580,7 @@ void test_rx_signal_calibration()
     high_curve.rx_gain_tenths_db = 250;
     for (const int input_dbm : high) {
         high_curve.points.push_back(
-            {input_dbm, static_cast<double>(input_dbm) + 50.0, 5.0, {}});
+            {input_dbm, static_cast<double>(input_dbm) + 5.0, 5.0, {}});
     }
     require(dmr_rpt::rx_calibration_curve_complete(
                 high_curve, dmr_rpt::RxCalibrationBand::High),
@@ -594,17 +594,39 @@ void test_rx_signal_calibration()
     require(low_reading.calibrated && low_reading.rssi_dbm &&
                 std::abs(*low_reading.rssi_dbm + 25.0) < 0.001,
             "low calibration interpolates measured dBFS into dBm");
-    require(!dmr_rpt::rx_calibration_reading(calibration, 0, 200, -45.0).calibrated,
-            "calibration rejects a curve with a mismatched RX gain");
+    const dmr_rpt::RxCalibrationReading compensated =
+        dmr_rpt::rx_calibration_reading(calibration, 0, 200, -70.0);
+    require(compensated.calibrated && compensated.rssi_dbm &&
+                std::abs(*compensated.rssi_dbm + 70.0) < 0.001 &&
+                compensated.reference_gain_tenths_db ==
+                    std::optional<std::int32_t>(250) &&
+                compensated.gain_compensation_db ==
+                    std::optional<double>(5.0) &&
+                compensated.compensated_dbfs ==
+                    std::optional<double>(-65.0),
+            "hardware AGC gain is translated to the nearest calibration gain");
     require(dmr_rpt::rx_calibration_reference_dbfs(
                 calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 250) ==
-                std::optional<double>(-20.0) &&
+                std::optional<double>(-65.0) &&
                 dmr_rpt::rx_calibration_reference_dbfs(
                     calibration, 0, dmr_rpt::RxCalibrationBand::Low, -60, 0) ==
                     std::optional<double>(-80.0) &&
                 !dmr_rpt::rx_calibration_reference_dbfs(
                     calibration, 0, dmr_rpt::RxCalibrationBand::High, -70, 0),
             "calibration exposes only matching-gain automatic-switch anchors");
+
+    for (int input_dbm = 0; input_dbm >= -80; input_dbm -= 5) {
+        for (const std::int32_t gain_tenths_db : {0, 100, 200}) {
+            const double measured_dbfs = static_cast<double>(input_dbm) - 20.0 +
+                gain_tenths_db / 10.0;
+            const dmr_rpt::RxCalibrationReading reading =
+                dmr_rpt::rx_calibration_reading(
+                    calibration, 0, gain_tenths_db, measured_dbfs);
+            require(reading.calibrated && reading.rssi_dbm &&
+                        std::abs(*reading.rssi_dbm - input_dbm) < 0.001,
+                    "gain compensation preserves the 80 dB low-band scale");
+        }
+    }
 
     dmr_rpt::RxSignalCalibrationRuntime runtime(calibration);
     for (int index = 0; index < 5; ++index) {

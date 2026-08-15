@@ -82,6 +82,13 @@ struct ReceiveStatus {
     bool active_call_state_known = false;
     std::optional<double> rssi_dbm;
     std::string calibration_state = "uncalibrated";
+    // Hardware AGC is intentionally disabled for calibrated RSSI. These
+    // fields expose the fixed analog gain and the downstream software AGC.
+    bool hardware_agc_enabled = false;
+    std::optional<double> analog_gain_db;
+    std::optional<double> software_agc_gain_db;
+    std::optional<double> agc_input_dbfs;
+    std::optional<double> rssi_gain_compensation_db;
 };
 
 class NetworkEventSink {

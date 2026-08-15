@@ -15,6 +15,7 @@ This copyright statement must be retained.
 source/
   CMakeLists.txt             独立 CMake 构建入口
   VERSION                    应用版本号
+  AGC_RSSI_RANGE_REPORT.md   AGC 补偿与 RSSI 范围报告
   rpt/                       转发器和 DMR 信号处理源码
     include/dmr_rpt/         转发控制平面接口
     include/dmr_b210/        GNU Radio 帧采样和帧构造接口
@@ -65,7 +66,7 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | `hardware_runtime.h` | GNU Radio/UHD 硬件会话和转发运行时工厂。 |
 | `interlock.h` | 发射互锁、呼叫生命周期和超时控制接口。 |
 | `io_status.h` | RX/TX 状态、RSSI、SNR、增益等状态快照。 |
-| `network_protocol.h` | UDP 命令、状态编码和远程控制协议接口。 |
+| `network_protocol.h` | UDP 命令、状态编码和远程控制协议接口；包括 RX 硬件 AGC 状态、模拟增益和软件 AGC 遥测。 |
 | `receive_agc.h` | 接收增益闭环控制规则。 |
 | `receive_signal_metrics.h` | dBFS、SNR 和 200 ms 平均信号强度统计。 |
 | `recording.h` | 录音命名、记录元数据和录音会话接口。 |
@@ -122,6 +123,7 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | --- | --- |
 | `repeater_contract_tests.cpp` | 依据 YAML 配置与 828S 向量验证转发器合同约束。 |
 | `network_protocol_tests.cpp` | 验证 UDP 命令、响应和状态字段。 |
+| `rx_signal_calibration_tests.cpp` | 验证硬件 AGC 模拟增益补偿和 80dB RSSI 计算范围。 |
 | `audio_recording_tests.cpp` | 验证录音命名、音频记录和 MP3 相关逻辑。 |
 | `dmr_burst_symbol_sampler_tests.cpp` | 验证 DMR 符号采样、同步和突发输出。 |
 | `dmr_short_message_frame_builder_tests.cpp` | 验证短消息 DMR 数据帧生成。 |

@@ -393,6 +393,15 @@ struct Receiver {
     double snr_db = 0.0;
     std::string calibration_state = "uncalibrated";
     std::string mode = "未知";
+    bool hardware_agc_enabled = false;
+    bool analog_gain_valid = false;
+    double analog_gain_db = 0.0;
+    bool software_agc_gain_valid = false;
+    double software_agc_gain_db = 0.0;
+    bool agc_input_valid = false;
+    double agc_input_dbfs = 0.0;
+    bool rssi_gain_compensation_valid = false;
+    double rssi_gain_compensation_db = 0.0;
 };
 
 struct Channel {
@@ -1032,6 +1041,15 @@ private:
             if (next.rssi_dbm_valid) next.rssi_dbm = json_number<double>(receiver, "rssi_dbm").value_or(0.0);
             if (next.snr_valid) next.snr_db = json_number<double>(receiver, "snr_db").value_or(0.0);
             next.calibration_state = json_string(receiver, "calibration_state").value_or("uncalibrated");
+            next.hardware_agc_enabled = json_bool(receiver, "hardware_agc_enabled").value_or(false);
+            next.analog_gain_valid = receiver.find("\"analog_gain_db\":null") == std::string::npos;
+            next.software_agc_gain_valid = receiver.find("\"software_agc_gain_db\":null") == std::string::npos;
+            next.agc_input_valid = receiver.find("\"agc_input_dbfs\":null") == std::string::npos;
+            next.rssi_gain_compensation_valid = receiver.find("\"rssi_gain_compensation_db\":null") == std::string::npos;
+            if (next.analog_gain_valid) next.analog_gain_db = json_number<double>(receiver, "analog_gain_db").value_or(0.0);
+            if (next.software_agc_gain_valid) next.software_agc_gain_db = json_number<double>(receiver, "software_agc_gain_db").value_or(0.0);
+            if (next.agc_input_valid) next.agc_input_dbfs = json_number<double>(receiver, "agc_input_dbfs").value_or(0.0);
+            if (next.rssi_gain_compensation_valid) next.rssi_gain_compensation_db = json_number<double>(receiver, "rssi_gain_compensation_db").value_or(0.0);
         }
         for (std::size_t channel = 0; channel < receiver_seen.size(); ++channel) {
             if (!receiver_seen[channel]) state_.receivers[channel] = {};
@@ -2149,7 +2167,29 @@ private:
              << (receiver.rssi_valid ? receiver.rssi_dbfs : 0.0) << " dBFS  SNR "
              << (receiver.snr_valid ? receiver.snr_db : 0.0) << " dB";
         draw_text_clipped(receiver.rssi_valid ? live.str() : "RX --", 104, 86, kCyan,
-                          {104, 82, 300, 24}, font_small_);
+                          {104, 82, 258, 24}, font_small_);
+        const std::string analog_gain = receiver.analog_gain_valid
+            ? gain_text(static_cast<int>(std::lround(receiver.analog_gain_db * 10.0)))
+            : "--";
+        const std::string software_gain = receiver.software_agc_gain_valid
+            ? gain_text(static_cast<int>(std::lround(receiver.software_agc_gain_db * 10.0)))
+            : "--";
+        draw_text(receiver.hardware_agc_enabled ? "硬AGC" : "固定",
+                  370, 84,
+                  receiver.hardware_agc_enabled ? kGreen : kAmber,
+                  font_small_);
+        draw_text_clipped(analog_gain, 408, 82, kCyan,
+                          {408, 82, 68, 24}, font_small_);
+        draw_text("软件AGC", 482, 84, kMuted, font_small_);
+        draw_text_clipped(software_gain, 550, 82, kCyan,
+                          {550, 82, 68, 24}, font_small_);
+        const std::string compensation = receiver.rssi_gain_compensation_valid
+            ? gain_text(static_cast<int>(std::lround(
+                receiver.rssi_gain_compensation_db * 10.0)))
+            : "--";
+        draw_text("补偿", 624, 84, kMuted, font_small_);
+        draw_text_clipped(compensation, 662, 82, kCyan,
+                          {662, 82, 102, 24}, font_small_);
         const bool calibration_selection_enabled = controls_enabled() &&
             calibration_.session_id.empty();
         add_button({24, 112, 76, 30}, "RX1", calibration_.rx_channel == 0 ? kCyan : kDark,

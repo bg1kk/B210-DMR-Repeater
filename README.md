@@ -19,6 +19,7 @@ This copyright statement must be retained.
 - `gui/`：Pi5 本地 SDL2 触摸 GUI 源码。
 - `CMakeLists.txt`：可在本目录独立生成 Unix Makefiles 的构建入口。
 - `SOURCE_STRUCTURE.md`：模块调用关系、各源文件职责和编译步骤。
+- `AGC_RSSI_RANGE_REPORT.md`：硬件 AGC、模拟增益补偿和 80dB RSSI 范围验收方法。
 - 工程根目录的 `CMakeLists.txt`、`cmake/`、`deploy/`、`gr-dmr/`、`test-vectors/` 是编译、部署及射频处理所需的配套文件，不在本目录重复保存。
 
 ## 3. 主要实现方法
@@ -26,11 +27,28 @@ This copyright statement must be retained.
 ### 射频与通话处理
 
 - GNU Radio 与 UHD 驱动 B210 双接收、DMR 发射链路。
-- B210/AD9361 RX source 创建及每次调 Gain 前显式关闭硬件 AGC；RSSI/SNR 使用软件数字 AGC 之前的原始 IQ dBFS，校准按固定物理 RX 和固定 UHD Gain 建立 dBFS 到 dBm 曲线。
+- B210/AD9361 正常工作时启用硬件 AGC，校准会话关闭硬件 AGC并固定模拟增益；RSSI/SNR 使用软件数字 AGC 之前的原始 IQ dBFS，并按实时模拟增益换算到校准参考增益。
 - DMR 使用直接帧转发：接收端通过同步、色码、时隙与呼叫类型检查后，原始突发帧按接收时钟节奏送到发射链路，不进行 AMBE 解码再编码。
 - AMBE 仅进入独立录音分支，使用 mbelib 解码为 PCM，再由 LAME 编码为单声道 8 kHz、16 kbps MP3。
 - FM 分支独立检测 CTCSS；CTCSS 由各信道配置，未配置时使用 123.0 Hz。FM 音频一路进入 DMR AMBE 编码与发射，另一路进入 MP3 录音。
 - 接收端含软件 AGC、RSSI/SNR 测量、DMR/FM 判别、静噪、互锁、PTT 与射频会话重建控制。
+
+### AGC 与 RSSI 校准契约
+
+- B210/AD9361 正常转发时必须启用硬件 AGC；进入校准会话时关闭，并将模拟增益固定为该列的
+  `rx_gain_tenths_db`。提交或取消校准后恢复硬件 AGC。状态协议中的 `hardware_agc_enabled`
+  必须反映当前真实状态。
+- `analog_gain_db` 是 B210 当前实际模拟 RX 增益，来自 UHD 设置后的读回值；
+  `software_agc_gain_db` 是程序在 IQ 基带上的实时数字增益；`agc_input_dbfs` 是数字 AGC
+  调整前的短窗口输入电平。三项通过 200ms UDP 状态帧发送，校准页显示当前 RX 的三项值。
+- RSSI 校准只使用数字 AGC 前的原始 `rssi_dbfs`，不得使用软件 AGC 输出值。正常运行时按
+  `参考dBFS = 实测dBFS + 参考模拟增益 - 当前模拟增益` 消除硬件 AGC 增益变化；状态协议通过
+  `rssi_gain_compensation_db` 给出本次补偿量。人工改变某列的参考校准增益后，必须重新完成该整列校准。
+- 低档固定增益校准点为 `0` 至 `-80 dBm`，高档固定增益校准点为 `-60` 至 `-140 dBm`。
+  每列的标称覆盖范围为 80dB，两个档位通过 20dB 重叠区衔接；单一固定增益是否达到 80dB
+  线性范围，必须以 9 个校准点全部有效、dBFS 严格单调、独立 5dB 验证点最大误差不超过 3dB、
+  均方根误差不超过 2dB且无 ADC 饱和/噪声底证据为准，不能仅由模拟增益数值推定。
+- GUI 的“自动增益”表示正常工作启用 AD9361 硬件 AGC；高/低列是 RSSI 换算使用的固定增益参考曲线。
 
 ### 网络与 GUI
 
@@ -112,7 +130,7 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 /usr/local/bin/dmr-b210-rpt-start --disable-fm
 ```
 
-验收使用 CTest；当前配置的 8 个测试覆盖网络协议、命令行、契约、DMR 突发采样、音频录音、安装部署和 GUI 自检。
+验收使用 CTest；当前配置的测试覆盖网络协议、RSSI 增益补偿、命令行、契约、DMR 突发采样、音频录音、安装部署和 GUI 自检。
 
 ## 8. 源码同步与提交规则
 
@@ -134,6 +152,13 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 - 明确 B210/AD9361 硬件 AGC 在 RX source 创建和每次调 Gain 前关闭；RSSI/SNR 使用软件数字 AGC 之前的原始 IQ dBFS。
 - GUI 开机 UDP 初始握手失败时每秒自动重试，超时请求不会永久锁死控件；Pi5 kiosk 服务启动失败自动重启。
 - Pi5 发布构建序号为 `B150`，根工程和独立 `source` 镜像使用同一份 GUI、RF 和校准实现。
+
+### V1.0.7 B151, 2026-08-15
+
+- 新增 UDP RX 增益遥测：硬件 AGC 状态、B210 模拟增益、软件 AGC 实时增益和 AGC 输入 dBFS。
+- 正常工作启用 AD9361 硬件 AGC，校准期间关闭并锁定模拟增益；提交或取消后自动恢复。
+- RSSI 使用实时模拟增益换算到最近的校准参考增益，校准页显示模拟增益、软件 AGC 和补偿量。
+- 将双档 80dB 标称覆盖范围、20dB 重叠区和固定增益线性验收条件写入契约。
 
 ### V1.0.7 B147, 2026-08-14
 

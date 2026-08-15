@@ -320,131 +320,6 @@ void apply_active_receive_gain_mode(dmr_rpt::RepeaterConfig& config,
     profile->analog_fm_fallback.rx.gain_tenths_db = gain_tenths_db;
 }
 
-std::optional<std::string> automatic_receive_gain_target(
-    const dmr_rpt::RepeaterConfig& config,
-    const dmr_rpt::RxSignalCalibrationRuntime& calibration,
-    std::int64_t now_ms)
-{
-    const auto profile = std::find_if(
-        config.channel_profiles.begin(), config.channel_profiles.end(),
-        [&](const dmr_rpt::ChannelProfile& item) {
-            return item.id == config.radio.active_channel_profile_id;
-        });
-    if (profile == config.channel_profiles.end()) {
-        return std::nullopt;
-    }
-    const auto& gain_control = config.radio.receive_gain_control;
-    if (!gain_control.automatic_switching.enabled) {
-        return std::nullopt;
-    }
-    const std::string active_mode = active_receive_gain_mode(config);
-    if (!dmr_rpt::is_selectable_receive_gain_mode(active_mode)) {
-        return std::nullopt;
-    }
-    std::vector<int> channels{profile->dmr_rx.channel};
-    if (profile->analog_fm_fallback.enabled) {
-        channels.push_back(profile->analog_fm_fallback.rx.channel);
-    }
-    if (active_mode == "high") {
-        for (const int channel : channels) {
-            const auto observation = calibration.observation(channel);
-            if (!observation || !observation->receiving ||
-                !observation->measured_dbfs ||
-                now_ms < observation->observed_at_ms ||
-                now_ms - observation->observed_at_ms > 1000 ||
-                observation->rx_gain_tenths_db !=
-                    gain_control.high_gain_tenths_db) {
-                continue;
-            }
-            const auto reference = calibration.reference_dbfs(
-                channel, dmr_rpt::RxCalibrationBand::High, -70,
-                gain_control.high_gain_tenths_db);
-            if (reference && *observation->measured_dbfs > *reference) {
-                return std::string("low");
-            }
-        }
-        return std::nullopt;
-    }
-
-    bool receiving_signal = false;
-    for (const int channel : channels) {
-        const auto observation = calibration.observation(channel);
-        if (!observation || !observation->receiving) {
-            continue;
-        }
-        receiving_signal = true;
-        if (!observation->measured_dbfs ||
-            now_ms < observation->observed_at_ms ||
-            now_ms - observation->observed_at_ms > 1000 ||
-            observation->rx_gain_tenths_db !=
-                gain_control.low_gain_tenths_db) {
-            return std::nullopt;
-        }
-        const auto reference = calibration.reference_dbfs(
-            channel, dmr_rpt::RxCalibrationBand::Low, -60,
-            gain_control.low_gain_tenths_db);
-        if (!reference || *observation->measured_dbfs >= *reference) {
-            return std::nullopt;
-        }
-    }
-    return receiving_signal ? std::optional<std::string>("high")
-                            : std::nullopt;
-}
-
-bool apply_automatic_receive_gain_target(
-    dmr_rpt::RfReinitializationController& rf,
-    const dmr_rpt::RepeaterConfig& current,
-    dmr_rpt::RepeaterConfig& candidate,
-    const std::string& target_mode,
-    std::string& error)
-{
-    const auto current_profile = std::find_if(
-        current.channel_profiles.begin(), current.channel_profiles.end(),
-        [&](const dmr_rpt::ChannelProfile& item) {
-            return item.id == current.radio.active_channel_profile_id;
-        });
-    if (current_profile == current.channel_profiles.end()) {
-        error = "active channel profile not found for automatic gain control";
-        return false;
-    }
-    std::vector<std::pair<int, std::int32_t>> previous_gains{
-        {current_profile->dmr_rx.channel, current_profile->dmr_rx.gain_tenths_db}};
-    if (current_profile->analog_fm_fallback.enabled) {
-        previous_gains.push_back({current_profile->analog_fm_fallback.rx.channel,
-                                  current_profile->analog_fm_fallback.rx
-                                      .gain_tenths_db});
-    }
-    std::sort(previous_gains.begin(), previous_gains.end(),
-              [](const auto& left, const auto& right) {
-                  return left.first < right.first;
-              });
-    previous_gains.erase(std::unique(previous_gains.begin(), previous_gains.end(),
-                                     [](const auto& left, const auto& right) {
-                                         return left.first == right.first;
-                                     }),
-                         previous_gains.end());
-    const std::int32_t target_gain = dmr_rpt::receive_gain_tenths_db_for_mode(
-        current.radio.receive_gain_control, target_mode);
-    std::size_t applied = 0;
-    for (; applied < previous_gains.size(); ++applied) {
-        std::string gain_error;
-        if (!rf.set_rx_gain(previous_gains[applied].first, target_gain,
-                            gain_error)) {
-            // The failed call can have written the UHD gain before its readback
-            // fails, so include its port in the best-effort rollback.
-            for (std::size_t rollback = 0; rollback <= applied; ++rollback) {
-                std::string ignored;
-                rf.set_rx_gain(previous_gains[rollback].first,
-                               previous_gains[rollback].second, ignored);
-            }
-            error = gain_error;
-            return false;
-        }
-    }
-    apply_active_receive_gain_mode(candidate, target_mode);
-    return true;
-}
-
 std::string gain_control_json(const dmr_rpt::RepeaterConfig& config,
                               const std::string& selection_mode)
 {
@@ -890,6 +765,9 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                     rf.set_rx_gain(calibration_session->rx_channel,
                                    calibration_session->previous_gain_tenths_db,
                                    ignored_gain_error);
+                    std::string ignored_agc_error;
+                    rf.set_rx_hardware_agc(calibration_session->rx_channel,
+                                           true, ignored_agc_error);
                     forwarding_enabled->store(
                         calibration_session->forwarding_was_enabled);
                     std::lock_guard<std::mutex> lock(state->mutex);
@@ -1265,40 +1143,6 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
             do {
                 next_rf_health_check_at += std::chrono::seconds(1);
             } while (next_rf_health_check_at <= health_now);
-        }
-        bool automatic_gain_selected = false;
-        {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            automatic_gain_selected = state->gain_selection_mode == "auto";
-        }
-        if (!calibration_session && rf.running() && automatic_gain_selected) {
-            if (const auto target = automatic_receive_gain_target(
-                    validated.config, *calibration, poll_time_ms)) {
-                try {
-                    dmr_rpt::RepeaterConfig candidate = validated.config;
-                    std::string gain_error;
-                    if (!apply_automatic_receive_gain_target(
-                            rf, validated.config, candidate, *target,
-                            gain_error)) {
-                        std::lock_guard<std::mutex> lock(state->mutex);
-                        state->last_error = gain_error;
-                    } else {
-                        const dmr_rpt::ValidatedConfig applied_validated =
-                            dmr_rpt::validate_config(candidate);
-                        validated = applied_validated;
-                        active_validated = applied_validated;
-                        std::lock_guard<std::mutex> lock(state->mutex);
-                        state->validated = validated;
-                        state->last_error.clear();
-                        audit.emit({"CAL", "receive_gain.auto_switched", "auto_gain",
-                                    "ok", validated.semantic_sha256,
-                                    {{"active_mode", *target}}});
-                    }
-                } catch (const std::exception& error) {
-                    std::lock_guard<std::mutex> lock(state->mutex);
-                    state->last_error = error.what();
-                }
-            }
         }
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_status_at) {
