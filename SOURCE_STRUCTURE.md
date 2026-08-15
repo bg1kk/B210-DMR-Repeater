@@ -68,7 +68,7 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | `event.h` | 收到、开始、转发、拒绝、结束等事件模型。 |
 | `hardware_runtime.h` | GNU Radio/UHD 硬件会话和转发运行时工厂。 |
 | `interlock.h` | 发射互锁、呼叫生命周期和超时控制接口。 |
-| `io_status.h` | IO0-IO3收发状态控制，以及IO4/IO5前级四档原子编码控制。 |
+| `io_status.h` | IO0-IO3收发状态控制，以及IO4/IO5前级四档输入码读取。 |
 | `network_protocol.h` | UDP 命令、状态编码和远程控制协议接口；目标版本包括三档固定 Gain、削顶状态和校准协议/2。 |
 | `receive_agc.h` | 软件数字 AGC 控制规则；目标版本另由固定三档 RangeController 管理硬件模拟 Gain。 |
 | `receive_signal_metrics.h` | dBFS、SNR 和 200 ms 平均信号强度统计。 |
@@ -98,7 +98,7 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | `src/dmr_burst.cpp` | 解析和分类 DMR 突发，提取 ID、色码、时隙和语音内容。 |
 | `src/event.cpp` | 格式化标准运行事件、短状态词元和日志内容。 |
 | `src/interlock.cpp` | 防止不符合状态的同时发射，处理结束和超时。 |
-| `src/io_status.cpp` | 输出收发状态并控制前级stage0-3，GPIO故障时锁存安全状态。 |
+| `src/io_status.cpp` | 输出收发状态并读取前级stage0-3输入码，GPIO故障时锁存安全状态。 |
 | `src/network_protocol.cpp` | UDP 请求解析、响应和版本/状态/校准/控制命令实现。 |
 | `src/recording.cpp` | 录音文件名、录音元数据和音频记录业务逻辑。 |
 | `src/remote_voice.cpp` | 远程 AMBE 音频收发和会话管理。 |
@@ -127,7 +127,7 @@ DMR 到 DMR 的实时转发沿透明突发帧路径运行，源 DMR 数据不经
 | `repeater_contract_tests.cpp` | 依据 YAML 配置与 828S 向量验证转发器合同约束。 |
 | `network_protocol_tests.cpp` | 验证 UDP 命令、响应和状态字段。 |
 | `rx_signal_calibration_tests.cpp` | 验证low/medium/high三档点表、12 dB弱端门限和分段RSSI换算。 |
-| `frontend_conditioning_tests.cpp` | 验证IO4/IO5四档原子编码、每档独立衰减、停止归零和故障锁存。 |
+| `frontend_conditioning_tests.cpp` | 验证IO4/IO5四档输入编码、每档独立衰减和读取故障锁存。 |
 | `audio_recording_tests.cpp` | 验证录音命名、音频记录和 MP3 相关逻辑。 |
 | `dmr_burst_symbol_sampler_tests.cpp` | 验证 DMR 符号采样、同步和突发输出。 |
 | `dmr_short_message_frame_builder_tests.cpp` | 验证短消息 DMR 数据帧生成。 |

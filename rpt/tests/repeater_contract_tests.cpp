@@ -87,28 +87,28 @@ public:
         return true;
     }
 
-    bool write_mask(const std::string&, std::uint32_t value,
-                    std::uint32_t mask) override
+    bool configure_input(const std::string&, int pin) override
     {
-        masked_writes.push_back({value, mask});
-        if (fail_write) {
-            return false;
-        }
-        for (int pin = 0; pin < 32; ++pin) {
-            const std::uint32_t bit = std::uint32_t{1} << pin;
-            if ((mask & bit) != 0U) {
-                levels[pin] = (value & bit) != 0U
-                    ? dmr_rpt::IoLevel::High : dmr_rpt::IoLevel::Low;
-            }
-        }
+        configured_inputs.push_back(pin);
         return true;
+    }
+
+    std::optional<std::uint32_t> read_mask(
+        const std::string&, std::uint32_t mask) override
+    {
+        read_masks.push_back(mask);
+        if (fail_read) return std::nullopt;
+        return input_value & mask;
     }
 
     bool fail_configure = false;
     bool fail_write = false;
+    bool fail_read = false;
+    std::uint32_t input_value = 0;
     std::vector<int> configured;
+    std::vector<int> configured_inputs;
     std::vector<std::pair<int, dmr_rpt::IoLevel>> writes;
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> masked_writes;
+    std::vector<std::uint32_t> read_masks;
     std::map<int, dmr_rpt::IoLevel> levels;
 };
 
@@ -209,16 +209,16 @@ void test_config(const std::filesystem::path& config_path)
             "frontend conditioning defaults reserve IO4/IO5 safely");
     require(!validated.config.data.enabled,
             "DMR data decode, relay, and active send remain disabled");
-    require(validated.config.contract_versions.at("RF") == "1.1.0" &&
+    require(validated.config.contract_versions.at("RF") == "1.1.1" &&
                 validated.config.contract_versions.at("AIR") == "0.6.2" &&
                 validated.config.contract_versions.at("RPT") == "0.7.0" &&
-                validated.config.contract_versions.at("NET") == "1.1.0" &&
+                validated.config.contract_versions.at("NET") == "1.1.1" &&
                 validated.config.contract_versions.at("UDP") == "0.12.3" &&
-                validated.config.contract_versions.at("CAL") == "2.0.0" &&
+                validated.config.contract_versions.at("CAL") == "2.0.1" &&
                 validated.config.contract_versions.at("SAFE") == "0.4.5" &&
                 validated.config.contract_versions.at("AFM") == "0.2.5" &&
                 validated.config.contract_versions.at("LOG") == "0.3.2" &&
-                validated.config.contract_versions.at("IO") == "0.2.0",
+                validated.config.contract_versions.at("IO") == "0.3.0",
             "runtime contract versions are current");
     require(validated.config.tcp_status.protocol == "dmr-rpt-tcp/1" &&
                 validated.config.tcp_status.interval_ms == 1000,
@@ -811,24 +811,27 @@ void test_io(const dmr_rpt::IoStatusConfig& config)
     dmr_rpt::RxFrontendConditioningConfig frontend_config;
     frontend_config.enabled = true;
     FakeGpio frontend_gpio;
+    frontend_gpio.input_value = (std::uint32_t{1} << 4) |
+        (std::uint32_t{1} << 5);
     dmr_rpt::B210FrontendStageController frontend(
         frontend_config, frontend_gpio);
     frontend.initialize("low");
     require(frontend.state().gpio_healthy && frontend.state().stage == 3 &&
                 frontend.state().attenuation_db == 30.0,
             "frontend starts in the maximum attenuation stage");
-    require(frontend_gpio.masked_writes.size() == 1U &&
-                frontend_gpio.masked_writes.back().first ==
-                    ((std::uint32_t{1} << 4) | (std::uint32_t{1} << 5)),
-            "frontend stage uses one atomic masked GPIO write");
-    require(frontend.set_stage("medium", 2) &&
+    require(frontend_gpio.configured_inputs == std::vector<int>({4, 5}) &&
+                frontend_gpio.read_masks.size() == 1U,
+            "frontend stage uses two GPIO inputs read in one mask");
+    frontend_gpio.input_value = std::uint32_t{1} << 5;
+    require(frontend.poll("medium") &&
                 frontend.state().gpio_code == 2 &&
                 frontend.state().attenuation_db == 20.0,
             "frontend stage and range select the configured attenuation");
-    frontend.release_stage_zero();
+    frontend_gpio.input_value = 0;
+    require(frontend.poll("medium"), "frontend stage zero read succeeds");
     require(frontend.state().stage == 0 &&
                 frontend.state().attenuation_db == 0.0,
-            "frontend releases to fixed stage zero");
+            "frontend input code zero uses fixed zero attenuation");
 }
 
 void test_audit(const dmr_rpt::LoggingConfig& config)

@@ -273,15 +273,25 @@ public:
         }
     }
 
-    bool write_mask(const std::string& bank,
-                    std::uint32_t value,
-                    std::uint32_t mask) override
+    bool configure_input(const std::string& bank, int pin) override
     {
         try {
-            source_->set_gpio_attr(bank, "OUT", value, mask, 0);
+            const std::uint32_t mask = std::uint32_t{1} << pin;
+            source_->set_gpio_attr(bank, "CTRL", 0, mask, 0);
+            source_->set_gpio_attr(bank, "DDR", 0, mask, 0);
             return true;
         } catch (const std::exception&) {
             return false;
+        }
+    }
+
+    std::optional<std::uint32_t> read_mask(
+        const std::string& bank, std::uint32_t mask) override
+    {
+        try {
+            return source_->get_gpio_attr(bank, "READBACK", 0) & mask;
+        } catch (const std::exception&) {
+            return std::nullopt;
         }
     }
 
@@ -310,10 +320,10 @@ public:
         }
     }
 
-    bool frontend_stage(const std::string& b210_range, int stage)
+    bool poll_frontend(const std::string& b210_range)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return frontend_.set_stage(b210_range, stage);
+        return frontend_.poll(b210_range);
     }
 
     FrontendStageState frontend_state() const
@@ -338,13 +348,13 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         controller_.poll(now_ms);
+        frontend_.poll(frontend_.state().b210_range);
     }
 
     void release()
     {
         std::lock_guard<std::mutex> lock(mutex_);
         controller_.release_all_high();
-        frontend_.release_stage_zero();
     }
 
 private:
@@ -2162,11 +2172,9 @@ public:
                 ? "high"
                 : rx.gain_tenths_db == gain_control.medium_gain_tenths_db
                     ? "medium" : "low";
-        if (!io_->frontend_stage(
-                frontend_range,
-                rf.radio.rx_frontend_conditioning.default_stage)) {
+        if (!io_->poll_frontend(frontend_range)) {
             throw std::runtime_error(
-                "frontend_gpio_fault: failed to apply configured stage");
+                "frontend_gpio_fault: failed to read stage inputs");
         }
 
         recording_ = std::make_shared<AudioRecordingRuntime>(
@@ -2682,6 +2690,13 @@ public:
             error = "B210 UHD session is not running";
             return false;
         }
+        if (io_) {
+            const FrontendStageState frontend = io_->frontend_state();
+            if (frontend.enabled && !frontend.gpio_healthy) {
+                error = "frontend_gpio_fault: " + frontend.last_error;
+                return false;
+            }
+        }
         try {
             const double rx_rate = source_->get_samp_rate();
             const double tx_rate = sink_->get_samp_rate();
@@ -2723,9 +2738,8 @@ public:
                         ? "high"
                         : gain_tenths_db == gain_control.medium_gain_tenths_db
                             ? "medium" : "low";
-                const int stage = io_->frontend_state().stage;
-                if (!io_->frontend_stage(range, stage)) {
-                    error = "frontend_gpio_fault: failed to update range";
+                if (!io_->poll_frontend(range)) {
+                    error = "frontend_gpio_fault: failed to read stage inputs";
                     return false;
                 }
             }

@@ -15,9 +15,10 @@ B210 hardware AGC remains disabled during calibration and normal operation.
 Each range has four external front-end conditioning stages, producing up to
 12 calibrated combinations.
 
-IO4 is the stage-code least significant bit and IO5 is the most significant
-bit. The codes are fixed: stage0=`00`, stage1=`01`, stage2=`10`, and
-stage3=`11`. Both bits are changed by one UHD masked GPIO write. Stage0 is
+IO4 is the stage-code least significant input bit and IO5 is the most significant
+input bit. The external front end drives the fixed codes: stage0=`00`,
+stage1=`01`, stage2=`10`, and stage3=`11`. Both bits are sampled by one UHD
+GPIO readback operation. Stage0 is
 always 0.0 dB. Stage1 through stage3 attenuation values are configured and
 measured independently for low, medium, and high B210 gain ranges.
 
@@ -66,4 +67,3 @@ calibrated reference.
 For stage1 through stage3, measure at least three overlap points for each B210
 gain range. The attenuation spread must not exceed 0.8 dB. Do not copy values
 between ranges. Validate all 12 combinations before enabling calibrated dBm.
-

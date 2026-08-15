@@ -41,17 +41,26 @@ public:
         return true;
     }
 
-    bool write_mask(const std::string&, std::uint32_t value,
-                    std::uint32_t mask) override
+    bool configure_input(const std::string&, int pin) override
     {
-        masked_writes.push_back({value, mask});
-        return !fail_masked_write;
+        configured_inputs.push_back(pin);
+        return true;
     }
 
-    bool fail_masked_write = false;
+    std::optional<std::uint32_t> read_mask(
+        const std::string&, std::uint32_t mask) override
+    {
+        read_masks.push_back(mask);
+        return fail_read ? std::nullopt
+                         : std::optional<std::uint32_t>(input_value & mask);
+    }
+
+    bool fail_read = false;
+    std::uint32_t input_value = 0;
     std::vector<int> configured;
+    std::vector<int> configured_inputs;
     std::map<int, dmr_rpt::IoLevel> levels;
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> masked_writes;
+    std::vector<std::uint32_t> read_masks;
 };
 
 } // namespace
@@ -66,37 +75,36 @@ int main()
         config.high_attenuation_db = {0.0, 10.0, 20.0, 30.0};
 
         FakeGpio gpio;
+        gpio.input_value = (std::uint32_t{1} << 4) |
+            (std::uint32_t{1} << 5);
         dmr_rpt::B210FrontendStageController controller(config, gpio);
         controller.initialize("low");
         require(controller.state().gpio_healthy, "initialization failed");
         require(controller.state().stage == 3 &&
                     controller.state().attenuation_db == 18.0,
-                "safe startup did not select maximum low-range attenuation");
-        require(gpio.configured == std::vector<int>({4, 5}),
-                "IO4 and IO5 were not configured");
-        require(gpio.masked_writes.size() == 1U,
-                "startup stage was not one atomic write");
+                "input code 11 did not select low-range stage3");
+        require(gpio.configured_inputs == std::vector<int>({4, 5}),
+                "IO4 and IO5 were not configured as inputs");
+        require(gpio.read_masks.size() == 1U,
+                "stage inputs were not read together");
 
-        require(controller.set_stage("medium", 1), "medium stage failed");
+        gpio.input_value = std::uint32_t{1} << 4;
+        require(controller.poll("medium"), "medium stage read failed");
         require(controller.state().gpio_code == 1 &&
                     controller.state().attenuation_db == 8.0,
                 "medium attenuation lookup failed");
-        require(controller.set_stage("high", 2), "high stage failed");
+        gpio.input_value = std::uint32_t{1} << 5;
+        require(controller.poll("high"), "high stage read failed");
         require(controller.state().gpio_code == 2 &&
                     controller.state().attenuation_db == 20.0,
                 "high attenuation lookup failed");
 
-        controller.release_stage_zero();
-        require(controller.state().stage == 0 &&
-                    controller.state().attenuation_db == 0.0,
-                "release did not restore stage zero");
-
         FakeGpio failing_gpio;
-        failing_gpio.fail_masked_write = true;
+        failing_gpio.fail_read = true;
         dmr_rpt::B210FrontendStageController failing(config, failing_gpio);
         failing.initialize("low");
         require(!failing.state().gpio_healthy,
-                "masked write failure did not latch a GPIO fault");
+                "GPIO input read failure did not latch a fault");
 
         std::cout << "Front-end conditioning tests passed\n";
         return 0;
@@ -105,4 +113,3 @@ int main()
         return 1;
     }
 }
-

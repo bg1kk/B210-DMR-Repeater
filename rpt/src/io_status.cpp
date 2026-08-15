@@ -186,47 +186,41 @@ void B210FrontendStageController::initialize(const std::string& b210_range)
         return;
     }
     for (const int pin : {config_.stage_bit0_io, config_.stage_bit1_io}) {
-        if (!contains_pin(capability.available_pins, pin) ||
-            !contains_pin(capability.output_capable_pins, pin)) {
-            fault("frontend GPIO pin is not output capable: IO" +
+        if (!contains_pin(capability.available_pins, pin)) {
+            fault("frontend GPIO pin is unavailable: IO" +
                   std::to_string(pin));
             return;
         }
-        if (!gpio_.configure_output(config_.gpio_bank, pin)) {
-            fault("failed to configure frontend GPIO IO" +
+        if (!gpio_.configure_input(config_.gpio_bank, pin)) {
+            fault("failed to configure frontend GPIO input IO" +
                   std::to_string(pin));
             return;
         }
     }
 
-    // The largest configured attenuation is the safe state before RX starts.
-    if (!set_stage(b210_range, 3)) {
-        return;
-    }
-    state_.gpio_healthy = true;
-    state_.last_error.clear();
+    poll(b210_range);
 }
 
-bool B210FrontendStageController::set_stage(const std::string& b210_range,
-                                             int stage)
+bool B210FrontendStageController::poll(const std::string& b210_range)
 {
-    if (stage < 0 || stage > 3) {
-        fault("frontend stage must be 0..3");
-        return false;
-    }
     const auto& values = attenuation_for(b210_range);
     if (!config_.enabled) {
         state_.stage = 0;
         state_.gpio_code = 0;
         state_.b210_range = b210_range;
         state_.attenuation_db = 0.0;
-        return stage == 0;
+        return true;
     }
-    if (!write_stage_code(stage)) {
-        fault("failed to atomically write frontend GPIO stage " +
-              std::to_string(stage));
+    const std::uint32_t bit0 = 1U << config_.stage_bit0_io;
+    const std::uint32_t bit1 = 1U << config_.stage_bit1_io;
+    const std::optional<std::uint32_t> value = gpio_.read_mask(
+        config_.gpio_bank, bit0 | bit1);
+    if (!value) {
+        fault("failed to read frontend GPIO stage inputs");
         return false;
     }
+    const int stage = ((*value & bit0) != 0U ? 1 : 0) |
+        ((*value & bit1) != 0U ? 2 : 0);
     state_.stage = stage;
     state_.gpio_code = stage;
     state_.b210_range = b210_range;
@@ -234,20 +228,6 @@ bool B210FrontendStageController::set_stage(const std::string& b210_range,
     state_.gpio_healthy = true;
     state_.last_error.clear();
     return true;
-}
-
-void B210FrontendStageController::release_stage_zero()
-{
-    if (!config_.enabled) {
-        return;
-    }
-    if (write_stage_code(0)) {
-        state_.stage = 0;
-        state_.gpio_code = 0;
-        state_.attenuation_db = 0.0;
-        return;
-    }
-    fault("failed to release frontend GPIO to stage 0");
 }
 
 const FrontendStageState& B210FrontendStageController::state() const
@@ -268,17 +248,6 @@ const std::array<double, 4>& B210FrontendStageController::attenuation_for(
         return config_.high_attenuation_db;
     }
     throw std::invalid_argument("B210 range must be low, medium, or high");
-}
-
-bool B210FrontendStageController::write_stage_code(int stage)
-{
-    const std::uint32_t bit0 = 1U << config_.stage_bit0_io;
-    const std::uint32_t bit1 = 1U << config_.stage_bit1_io;
-    const std::uint32_t mask = bit0 | bit1;
-    const std::uint32_t value =
-        ((stage & 1) != 0 ? bit0 : 0U) |
-        ((stage & 2) != 0 ? bit1 : 0U);
-    return gpio_.write_mask(config_.gpio_bank, value, mask);
 }
 
 void B210FrontendStageController::fault(const std::string& message)

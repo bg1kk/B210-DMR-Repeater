@@ -33,9 +33,9 @@ public:
     virtual GpioCapability capability(const std::string& bank) = 0;
     virtual bool configure_output(const std::string& bank, int pin) = 0;
     virtual bool write(const std::string& bank, int pin, IoLevel level) = 0;
-    virtual bool write_mask(const std::string& bank,
-                            std::uint32_t value,
-                            std::uint32_t mask) = 0;
+    virtual bool configure_input(const std::string& bank, int pin) = 0;
+    virtual std::optional<std::uint32_t> read_mask(
+        const std::string& bank, std::uint32_t mask) = 0;
 };
 
 struct IoPinRuntime {
@@ -104,14 +104,12 @@ public:
                                 B210GpioAdapter& gpio);
 
     void initialize(const std::string& b210_range = "low");
-    bool set_stage(const std::string& b210_range, int stage);
-    void release_stage_zero();
+    bool poll(const std::string& b210_range);
     const FrontendStageState& state() const;
 
 private:
     const std::array<double, 4>& attenuation_for(
         const std::string& b210_range) const;
-    bool write_stage_code(int stage);
     void fault(const std::string& message);
 
     RxFrontendConditioningConfig config_;

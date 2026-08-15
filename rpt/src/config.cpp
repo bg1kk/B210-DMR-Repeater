@@ -719,18 +719,18 @@ RepeaterConfig parse_root(const YAML::Node& root)
     require_map(root, "root");
     RepeaterConfig config;
     config.contract_versions = {
-        {"RF", "1.1.0"},
+        {"RF", "1.1.1"},
         {"AIR", "0.6.2"},
         {"RPT", "0.7.0"},
         {"AUDIO", "0.3.4"},
         {"DATA", "0.3.8"},
-        {"NET", "1.1.0"},
+        {"NET", "1.1.1"},
         {"SAFE", "0.4.5"},
         {"UDP", "0.12.3"},
-        {"CAL", "2.0.0"},
+        {"CAL", "2.0.1"},
         {"AFM", "0.2.5"},
         {"LOG", "0.3.2"},
-        {"IO", "0.2.0"},
+        {"IO", "0.3.0"},
     };
     config.version = get_int(root, "version", "root");
 
