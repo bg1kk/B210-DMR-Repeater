@@ -82,7 +82,7 @@ LNA 和混频器实际增益会随频率、温度和器件差异变化。因此�
 | 实际分辨率 | 由 UHD 和当前设备能力决定；设置后必须读回，不保证芯片内部每级按 0.1 dB 变化 |
 | 当前低增益参考 | 0.0 dB |
 | 当前高增益参考 | 25.0 dB |
-| 正常运行 | 启用 AD9361 硬件 AGC，程序读取当前聚合模拟增益用于 RSSI 补偿 |
+| 正常运行 | 启用 AD9361 硬件 AGC；但标准 UHD `get_gain()`只返回 `PGA` 属性中的设定/缓存值，不返回当前 AGC 增益索引 |
 | RSSI 校准 | 关闭硬件 AGC，固定总硬件增益后逐点校准 |
 | RX 独立性 | B210 两个接收通道分别设置和读回 |
 
@@ -112,15 +112,17 @@ LNA 和混频器实际增益会随频率、温度和器件差异变化。因此�
 
 - 分别设置 RX1/RX2 的 B210 聚合接收增益。
 - 启用或关闭每个 RX 的 AD9361 硬件 AGC。
-- 读回每个 RX 当前聚合模拟增益，并发送给 GUI。
+- 在手动增益模式读回每个 RX 的聚合增益设定值，并发送给 GUI。
 - 配置项目软件 AGC 的目标、上下限和响应速度。
-- 在校准模式固定硬件增益，正常运行时用实时硬件增益补偿 RSSI。
+- 在校准模式关闭硬件 AGC并固定硬件增益，使整条接收链可以端到端标定。
 
 ### 当前程序不能完成
 
 - 通过现有 UHD 接口分别指定 LNA、Mixer、TIA、LPF 的具体增益。
 - 从现有 UHD B210 API 分别实时读取上述 4 个内部模块的当前增益。
 - 证明 AD9361 可选数字增益当前是否参与硬件 AGC，或独立读取其数值。
+- 通过标准 UHD `get_gain()`读取硬件 AGC 当前实际使用的增益表索引。当前代码每 200 ms
+  调用该接口得到的是缓存的 `PGA` 属性值，不能作为实时 AGC 增益补偿量。
 
 若必须逐级控制或逐级遥测，需要修改 AD9361 驱动、增益表和寄存器访问路径，并重新进行
 噪声系数、线性度、阻塞和频率覆盖测试。对当前转发器，这样做的风险和维护成本高于收益，
@@ -140,21 +142,90 @@ LNA 和混频器实际增益会随频率、温度和器件差异变化。因此�
 
 1. 80 dB 线性 RSSI 范围不能由“76 dB 硬件增益 + 60 dB 软件 AGC”直接相加得出。
 2. 硬件增益影响 ADC 前的信号和噪声；软件 AGC 位于 ADC 后，不扩展模拟动态范围。
-3. 正常工作时硬件 AGC 改变聚合模拟增益，必须用实时读回增益换算到校准参考增益。
+3. 正常工作时硬件 AGC 改变聚合模拟增益，必须取得真正的当前增益表索引才能换算到
+   校准参考增益；标准 B210 UHD `get_gain()`不满足这个条件。
 4. 校准时必须关闭硬件 AGC并固定增益，避免同一个输入功率对应多个 dBFS 值。
 5. 最终可用线性范围仍应由低档 0 至 -80 dBm、高档 -60 至 -140 dBm 的实测校准点、
    单调性、误差、噪声底和 ADC 饱和情况共同判定。
 
-## 8. 代码对应位置
+## 8. 不可独立控制的内部增益是否可读
+
+### 8.1 标准 UHD 接口
+
+B210 的 UHD 驱动只通过 `get_gain_names()`公开一个名为 `PGA` 的聚合增益级，范围是
+0 至 76 dB、步进 1 dB。应用程序可以设置这个聚合值，也可以读取属性树保存的值，但不能
+通过标准 `multi_usrp` API取得 LNA、Mixer、TIA、LPF 和片内数字增益的当前独立值。
+
+硬件 AGC 开启时，AD9361会自行移动增益表索引；UHD B200驱动的`PGA`属性没有以
+AD9361当前状态寄存器作为publisher，因此`get_rx_gain()`/GNU Radio `get_gain()`仍是
+设定/缓存值。当前程序把该值作为实时`analog_gain_db`并做RSSI补偿不够严谨，需要后续
+驱动遥测改造或改变正常工作增益策略。
+
+### 8.2 AD9361 芯片寄存器
+
+芯片层面可以读取当前增益状态，但读到的主要是索引，不是每个模拟器件的实测dB值：
+
+| 接收通道 | Full/LMT索引 | LPF索引 | 数字增益索引 |
+| --- | --- | --- | --- |
+| RX1 | `0x2B0` | `0x2B1` | `0x2B2` |
+| RX2 | `0x2B5` | `0x2B6` | `0x2B7` |
+
+Full Gain Table模式下，可以用Full/LMT索引查回当前增益表行，再从该行解析LNA、Mixer、
+TIA等组合。Analog Devices的`ad9361_get_rx_gain()`就是按此方法读取当前状态。标准B210
+UHD没有把这些寄存器公开给用户程序；若要实时显示，需在UHD的AD9361/B200驱动中增加
+只读sensor或专用API，不能把普通`get_gain()`当作替代。
+
+寄存器给出的是标称索引。实际模拟增益仍会受频率、温度、器件离散性和板级路径影响，
+所以即使增加了逐级遥测，也仍需整机校准。
+
+## 9. 校准能否排除内部增益影响
+
+### 固定硬件增益校准：可以
+
+校准时关闭硬件AGC并固定聚合增益索引，内部LNA、Mixer、TIA和LPF的组合也随之固定。
+用B210端口处已知dBm输入与软件AGC前dBFS建立曲线，会把下列固定影响一起吸收到曲线中：
+
+- AD9361内部各模拟级的实际总增益和增益误差。
+- ADC比例、模拟滤波器和数字信道滤波器的固定响应。
+- 当前天线端口、板级射频路径和接入电缆的固定损耗。
+
+因此固定增益校准不需要知道每个内部模块的独立dB值，也能得到端到端绝对信号强度。
+但曲线至少应按物理RX、硬件增益档、频段或信道、带宽和天线端口区分；上述任一条件改变，
+原曲线都必须重新验证。当前仅按RX1/RX2和高/低档保存四列曲线，对跨VHF/UHF频率的
+绝对精度仍需增加按频段或信道分组的校准数据。
+
+### 正常运行开启硬件AGC：当前不能完全排除
+
+如果只有dBFS和UHD缓存增益值，同一个dBFS可能对应不同输入dBm，映射不唯一，无法准确
+排除硬件AGC影响。要继续满足“正常运行启用硬件AGC”的契约，需要：
+
+1. 扩展UHD，读取RX1/RX2当前Full/LMT、LPF和数字增益索引。
+2. 在与200 ms RSSI统计相同的时间窗内采样增益状态，不能只在窗口外偶尔读取一次。
+3. 按实际增益表将索引转换为标称总增益，并使用对应频段、RX和增益状态的校准修正。
+4. 对AGC切换点、强信号压缩、噪声底和温漂进行独立误差验收。
+
+若绝对RSSI优先级高于片内AGC，则更简单可靠的方案是正常运行也关闭硬件AGC，只使用
+经过校准的高/低固定硬件增益档自动切换，并由项目软件AGC保证解调幅度。该方案与当前
+“正常运行启用硬件AGC”的既有契约冲突，实施前需要明确修改契约。
+
+## 10. 代码对应位置
 
 - `rpt/include/dmr_rpt/config.h`：软件 AGC 默认范围、硬件高低增益参考和 0.1 dB 配置单位。
 - `rpt/include/dmr_rpt/receive_agc.h`：软件 AGC 的目标增益、限幅和攻击/恢复计算。
-- `rpt/src/hardware_runtime.cpp`：UHD 硬件增益/AGC控制、实际增益读回、RSSI 测量点、
-  DMR/FM 软件 AGC 和解调连接顺序。
+- `rpt/src/hardware_runtime.cpp`：UHD硬件增益/AGC控制、聚合设定值读回、RSSI测量点、
+  DMR/FM软件AGC和解调连接顺序；硬件AGC模式下的读回限制见本报告第8节。
 
-## 9. 原厂资料
+## 11. 原厂资料
 
 - Ettus USRP B200/B210 官方说明：<https://files.ettus.com/manual/page_usrp_b200.html>
 - UHD `multi_usrp` 官方 API：<https://files.ettus.com/manual/classuhd_1_1usrp_1_1multi__usrp.html>
 - Analog Devices AD9361 Reference Manual UG-570：
   <https://www.analog.com/media/en/technical-documentation/user-guides/AD9361_Reference_Manual_UG-570.pdf>
+- Ettus UHD B200驱动源码：
+  <https://github.com/EttusResearch/uhd/blob/master/host/lib/usrp/b200/b200_impl.cpp>
+- Ettus UHD AD9361聚合增益接口：
+  <https://github.com/EttusResearch/uhd/blob/master/host/lib/include/uhdlib/usrp/common/ad9361_ctrl.hpp>
+- Ettus UHD AD9361控制源码：
+  <https://github.com/EttusResearch/uhd/blob/master/host/lib/usrp/common/ad9361_driver/ad9361_device.cpp>
+- Analog Devices no-OS当前增益读取实现：
+  <https://github.com/analogdevicesinc/no-OS/blob/main/drivers/rf-transceiver/ad9361/ad9361.c>
