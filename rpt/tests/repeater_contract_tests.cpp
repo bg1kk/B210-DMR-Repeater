@@ -190,7 +190,7 @@ void test_config(const std::filesystem::path& config_path)
                 validated.config.contract_versions.at("RPT") == "0.7.0" &&
                 validated.config.contract_versions.at("NET") == "0.4.6" &&
                 validated.config.contract_versions.at("UDP") == "0.12.3" &&
-                validated.config.contract_versions.at("CAL") == "0.3.0" &&
+                validated.config.contract_versions.at("CAL") == "0.3.1" &&
                 validated.config.contract_versions.at("SAFE") == "0.4.5" &&
                 validated.config.contract_versions.at("AFM") == "0.2.5" &&
                 validated.config.contract_versions.at("LOG") == "0.3.2",
@@ -554,8 +554,8 @@ void test_rx_signal_calibration()
         dmr_rpt::RxCalibrationBand::Low);
     const auto& high = dmr_rpt::rx_calibration_required_inputs(
         dmr_rpt::RxCalibrationBand::High);
-    require(low == std::vector<int>({10, 0, -10, -20, -30, -40, -50, -60, -70}),
-            "low calibration input ladder is +10 through -70 dBm");
+    require(low == std::vector<int>({0, -10, -20, -30, -40, -50, -60, -70, -80}),
+            "low calibration input ladder is 0 through -80 dBm");
     require(high == std::vector<int>({-60, -70, -80, -90, -100, -110, -120,
                                       -130, -140}),
             "high calibration input ladder is -60 through -140 dBm");

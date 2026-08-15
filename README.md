@@ -11,7 +11,7 @@ This copyright statement must be retained.
 
 本项目实现运行于 Raspberry Pi 5 的 USRP B210 DMR 数字转发器及本地触摸屏控制终端。系统接收 VHF/UHF DMR 信号，透明转发原始 DMR 帧到配置的 DMR 发射频点；可选接收带 CTCSS 的模拟 FM 信号，并以固定源 ID `9999`、全呼目标 ID `16777215` 转发为 DMR。程序同时记录通话音频为 MP3，并通过 UDP 向 GUI 提供实时运行状态和控制能力。
 
-当前应用版本：`V1.0.7 B147`。
+当前应用版本：`V1.0.7 B150`。
 
 ## 2. 源码目录
 
@@ -26,6 +26,7 @@ This copyright statement must be retained.
 ### 射频与通话处理
 
 - GNU Radio 与 UHD 驱动 B210 双接收、DMR 发射链路。
+- B210/AD9361 RX source 创建及每次调 Gain 前显式关闭硬件 AGC；RSSI/SNR 使用软件数字 AGC 之前的原始 IQ dBFS，校准按固定物理 RX 和固定 UHD Gain 建立 dBFS 到 dBm 曲线。
 - DMR 使用直接帧转发：接收端通过同步、色码、时隙与呼叫类型检查后，原始突发帧按接收时钟节奏送到发射链路，不进行 AMBE 解码再编码。
 - AMBE 仅进入独立录音分支，使用 mbelib 解码为 PCM，再由 LAME 编码为单声道 8 kHz、16 kbps MP3。
 - FM 分支独立检测 CTCSS；CTCSS 由各信道配置，未配置时使用 123.0 Hz。FM 音频一路进入 DMR AMBE 编码与发射，另一路进入 MP3 录音。
@@ -118,6 +119,21 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 每次源码修改生成新构建或新版本时，必须在测试通过后同步本目录，按照实际更改内容编写 Git 提交信息并推送到 GitHub `main` 分支。推送后必须确认远端提交哈希与本地 `HEAD` 一致；推送失败时不得声明该版本已经完成 GitHub 同步。
 
 ## 9. 版本更新说明
+
+### V1.0.7 B149, 2026-08-14
+
+- 修复校准命令异步入队后 GUI 只回读一次旧状态的问题；校准页面改为每 200 ms 持续查询，查询丢失超过 1 秒自动重试。
+- 修复会话点可能写入上一 RX/档位列，以及最后一个 `next_input_dbm=null` 被误显示为 `0 dBm` 的问题。
+- 每次提交成功后下一点立即反色显示“待测”；提交按钮从第 1 点到第 9 点持续反色，最后一点完成后恢复普通状态并禁用。
+- 低档固定校准范围由 `+10` 至 `-70 dBm` 调整为 `0` 至 `-80 dBm`；CAL 契约版本升级至 `0.3.1`。
+
+### V1.0.7 B150, 2026-08-15
+
+- 修复校准页 RX1/RX2 与 low/high 选择被旧状态回读覆盖的问题；活动会话锁定选择，改变高档 Gain 自动清空整列旧点并要求重新校准。
+- 修复后台 `CAL query` 被误判为未保存操作；保存成功必须收到 `config_written=true`，提交回执现在返回该字段。
+- 明确 B210/AD9361 硬件 AGC 在 RX source 创建和每次调 Gain 前关闭；RSSI/SNR 使用软件数字 AGC 之前的原始 IQ dBFS。
+- GUI 开机 UDP 初始握手失败时每秒自动重试，超时请求不会永久锁死控件；Pi5 kiosk 服务启动失败自动重启。
+- Pi5 发布构建序号为 `B150`，根工程和独立 `source` 镜像使用同一份 GUI、RF 和校准实现。
 
 ### V1.0.7 B147, 2026-08-14
 

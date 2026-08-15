@@ -413,7 +413,7 @@ const std::array<int, 38> kStandardCtcssToneTenthsHz = {
 };
 
 const std::array<int, 9> kLowCalibrationInputDbm = {
-    10, 0, -10, -20, -30, -40, -50, -60, -70
+    0, -10, -20, -30, -40, -50, -60, -70, -80
 };
 
 const std::array<int, 9> kHighCalibrationInputDbm = {
@@ -481,7 +481,7 @@ struct CalibrationUiState {
     std::string band = "low";
     std::string session_id;
     std::string state = "idle";
-    int next_input_dbm = 0;
+    std::optional<int> next_input_dbm;
     int completed_points = 0;
     int gain_tenths_db = 0;
     std::array<std::optional<int>, 4> column_gain{};
@@ -491,6 +491,18 @@ struct CalibrationUiState {
     std::string password_input;
     std::string password_error;
 };
+
+bool calibration_step_available(const CalibrationUiState& calibration)
+{
+    if (calibration.session_id.empty() || !calibration.next_input_dbm ||
+        calibration.completed_points < 0 || calibration.completed_points >= 9) {
+        return false;
+    }
+    const auto& inputs = calibration.band == "high"
+        ? kHighCalibrationInputDbm : kLowCalibrationInputDbm;
+    return std::find(inputs.begin(), inputs.end(), *calibration.next_input_dbm) !=
+        inputs.end();
+}
 
 struct EventLine {
     std::string time;
@@ -615,14 +627,29 @@ public:
     {
         const auto level = s_meter(-87.0, -87.0);
         const auto started = std::chrono::steady_clock::now() - std::chrono::seconds(3661);
+        CalibrationUiState calibration;
+        calibration.session_id = "self-test";
+        calibration.state = "signal_unstable";
+        calibration.next_input_dbm = 0;
+        const bool first_point_available = calibration_step_available(calibration);
+        calibration.completed_points = 8;
+        calibration.next_input_dbm = -80;
+        const bool last_point_available = calibration_step_available(calibration);
+        calibration.completed_points = 9;
+        calibration.next_input_dbm.reset();
         return level.label == "S9" && level.lit_segments == 9 &&
             s_meter(-67.0, -87.0).label == "S9 +20 dB" &&
             s_meter(-140.0, -87.0).lit_segments == 0 &&
-            elapsed_clock(started) == "01:01:01";
+            elapsed_clock(started) == "01:01:01" &&
+            kLowCalibrationInputDbm.front() == 0 &&
+            kLowCalibrationInputDbm.back() == -80 &&
+            first_point_available && last_point_available &&
+            !calibration_step_available(calibration);
     }
 
     void configure_qa_view(const std::string& view)
     {
+        qa_view_enabled_ = true;
         if (view == "home") {
             page_ = 0;
         } else if (view == "channels") {
@@ -644,10 +671,12 @@ public:
         } else if (view == "calibration" || view == "dialog") {
             page_ = 4;
             calibration_.authorized = true;
+            calibration_.state = "active";
+            calibration_.session_id = "qa-layout";
+            calibration_.next_input_dbm = kLowCalibrationInputDbm.front();
             if (view == "dialog") {
-                calibration_.state = "active";
-                calibration_.session_id = "qa-layout";
                 calibration_.completed_points = 5;
+                calibration_.next_input_dbm = kLowCalibrationInputDbm[5];
                 calibration_leave_dialog_ = true;
             }
         } else {
@@ -814,6 +843,7 @@ private:
 
     void send_initial_queries()
     {
+        last_connection_attempt_ = std::chrono::steady_clock::now();
         track(client_.send("get_version"), "读取中继版本");
         track(client_.send("get_status"), "读取运行状态");
         track(client_.send("get_channel"), "读取活动信道");
@@ -834,6 +864,34 @@ private:
     void track(const std::string& id, const std::string& action)
     {
         pending_[id] = action;
+        pending_sent_at_[id] = std::chrono::steady_clock::now();
+    }
+
+    void expire_pending_requests()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = pending_sent_at_.begin(); it != pending_sent_at_.end();) {
+            if (now - it->second <= std::chrono::milliseconds(1500)) {
+                ++it;
+                continue;
+            }
+            const auto pending = pending_.find(it->first);
+            if (pending != pending_.end()) {
+                const std::string action = pending->second;
+                pending_.erase(pending);
+                if (action != "CAL query") add_event(action + "超时", kRed);
+            }
+            it = pending_sent_at_.erase(it);
+        }
+    }
+
+    void retry_controller_connection()
+    {
+        if (!state_.stale && state_.online) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_connection_attempt_ < std::chrono::seconds(1)) return;
+        add_event("重试中继连接", kAmber);
+        send_initial_queries();
     }
 
     void add_event(std::string message, SDL_Color color)
@@ -854,7 +912,9 @@ private:
                 update_response(frame);
             }
         }
+        expire_pending_requests();
         refresh_due_channels();
+        refresh_calibration_page();
         refresh_pending_calibration_exit();
         const auto now = std::chrono::steady_clock::now();
         const bool stale = state_.last_update.time_since_epoch().count() == 0 ||
@@ -867,6 +927,7 @@ private:
             }
         }
         state_.online = !state_.stale;
+        retry_controller_connection();
     }
 
     void update_runtime(const std::string& object)
@@ -1043,6 +1104,7 @@ private:
         const auto pending = pending_.find(request_id);
         const std::string action = pending == pending_.end() ? "UDP 命令" : pending->second;
         if (pending != pending_.end()) pending_.erase(pending);
+        pending_sent_at_.erase(request_id);
         const bool ok = json_bool(frame, "ok").value_or(false);
         const std::string code = json_string(frame, "code").value_or("错误");
         const std::string message = json_string(frame, "message").value_or("");
@@ -1052,18 +1114,25 @@ private:
         }
         const std::string state = json_object(frame, "state");
         if (!state.empty()) {
-            update_calibration_state(state);
-            if (state.find("\"state\"") != std::string::npos &&
-                state.find("\"dmr_rx\"") == std::string::npos) {
+            const bool calibration_state =
+                state.find("\"state\"") != std::string::npos &&
+                state.find("\"dmr_rx\"") == std::string::npos;
+            if (calibration_state && !qa_view_enabled_) {
                 calibration_.state = json_string(state, "state").value_or("idle");
-                calibration_.session_id = json_string(state, "session_id").value_or("");
-                calibration_.band = json_string(state, "band").value_or(calibration_.band);
-                calibration_.rx_channel = json_number<int>(state, "rx_channel").value_or(calibration_.rx_channel);
-                calibration_.selected_column = calibration_.rx_channel * 2 +
-                    (calibration_.band == "high" ? 1 : 0);
-                calibration_.next_input_dbm = json_number<int>(state, "next_input_dbm").value_or(0);
+                const std::string session_id = json_string(state, "session_id").value_or("");
+                calibration_.session_id = session_id;
+                if (!session_id.empty()) {
+                    calibration_.band = json_string(state, "band").value_or(calibration_.band);
+                    calibration_.rx_channel = json_number<int>(state, "rx_channel").value_or(calibration_.rx_channel);
+                    calibration_.selected_column = calibration_.rx_channel * 2 +
+                        (calibration_.band == "high" ? 1 : 0);
+                }
+                calibration_.next_input_dbm = json_number<int>(state, "next_input_dbm");
                 calibration_.completed_points = json_number<int>(state, "completed_points").value_or(0);
                 calibration_.gain_tenths_db = json_number<int>(state, "rx_gain_tenths_db").value_or(0);
+            }
+            if (!calibration_state || !qa_view_enabled_) {
+                update_calibration_state(state);
             }
             if (request_id.find("channel") != std::string::npos ||
                 state.find("\"dmr_rx\"") != std::string::npos) {
@@ -1071,6 +1140,10 @@ private:
                     requested_profile == state_.active_profile);
             }
             update_runtime(state);
+            if (action == "CAL save" && ok &&
+                json_bool(state, "config_written").value_or(false)) {
+                add_event("校准已保存", kGreen);
+            }
         }
         if (calibration_exit_after_save_ && calibration_.state == "committed" &&
             calibration_.session_id.empty()) {
@@ -1664,11 +1737,11 @@ private:
 
     void step_rx_calibration()
     {
-        if (calibration_.session_id.empty()) return;
+        if (!calibration_step_available(calibration_)) return;
         send_control("rx_calibration_step",
                      "\"session_id\":\"" + calibration_.session_id +
                          "\",\"input_dbm\":" +
-                         std::to_string(calibration_.next_input_dbm),
+                         std::to_string(*calibration_.next_input_dbm),
                      "CAL submit");
     }
 
@@ -1703,7 +1776,8 @@ private:
     {
         if (!calibration_.session_id.empty()) return true;
         return std::any_of(pending_.begin(), pending_.end(), [](const auto& item) {
-            return item.second.rfind("CAL ", 0) == 0;
+            return item.second == "CAL begin" || item.second == "CAL submit" ||
+                item.second == "CAL save" || item.second == "CAL cancel";
         });
     }
 
@@ -1754,8 +1828,22 @@ private:
         if (calibration_query_request_) return;
         try {
             calibration_query_request_ = client_.send("get_rx_calibration");
+            calibration_query_sent_at_ = std::chrono::steady_clock::now();
         } catch (...) {
         }
+    }
+
+    void refresh_calibration_page()
+    {
+        if (qa_view_enabled_ || page_ != 4 || !calibration_.authorized) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (calibration_query_request_ &&
+            now - calibration_query_sent_at_ > std::chrono::seconds(1)) {
+            calibration_query_request_.reset();
+        }
+        if (now < next_calibration_query_) return;
+        request_calibration_refresh();
+        next_calibration_query_ = now + std::chrono::milliseconds(200);
     }
 
     void refresh_pending_calibration_exit()
@@ -1775,14 +1863,20 @@ private:
     void select_calibration_column(int column)
     {
         if (column < 0 || column >= 4) return;
+        if (!calibration_.session_id.empty()) {
+            add_event("校准进行中，档位已锁定", kAmber);
+            return;
+        }
         calibration_.selected_column = column;
         calibration_.rx_channel = column / 2;
         calibration_.band = column % 2 == 0 ? "low" : "high";
+        calibration_.gain_tenths_db = calibration_.band == "low" ? 0 :
+            calibration_.column_gain[static_cast<std::size_t>(column)].value_or(250);
     }
 
     void set_calibration_gain(int delta_tenths_db)
     {
-        if (calibration_.band == "low") {
+        if (calibration_.band == "low" || !calibration_.session_id.empty()) {
             calibration_.gain_tenths_db = 0;
             return;
         }
@@ -1790,12 +1884,16 @@ private:
         const int current = calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
             calibration_.gain_tenths_db);
         const int next = std::clamp(current + delta_tenths_db, 0, 1000);
+        if (next != current) {
+            calibration_.column_points[static_cast<std::size_t>(column)].clear();
+            calibration_.column_gain[static_cast<std::size_t>(column)] = next;
+        }
         calibration_.gain_tenths_db = next;
     }
 
     void auto_calibration_gain()
     {
-        if (calibration_.band == "low") {
+        if (calibration_.band == "low" || !calibration_.session_id.empty()) {
             calibration_.gain_tenths_db = 0;
             return;
         }
@@ -1808,6 +1906,10 @@ private:
             .value_or(calibration_.gain_tenths_db);
         const int next = std::clamp(current + static_cast<int>(std::lround((-20.0 - receiver.rssi_dbfs) * 10.0)),
                                     0, 1000);
+        if (next != current) {
+            calibration_.column_points[static_cast<std::size_t>(calibration_.selected_column)].clear();
+            calibration_.column_gain[static_cast<std::size_t>(calibration_.selected_column)] = next;
+        }
         calibration_.gain_tenths_db = next;
     }
 
@@ -1816,10 +1918,7 @@ private:
         if (calibration_.password_input == config_.calibration_password) {
             calibration_.authorized = true;
             calibration_.password_error.clear();
-            try {
-                track(client_.send("get_rx_calibration"), "CAL query");
-            } catch (...) {
-            }
+            request_calibration_refresh();
             return;
         }
         calibration_.password_input.clear();
@@ -1975,14 +2074,14 @@ private:
         constexpr int first_value_x_offset = 66;
         constexpr int value_width = 140;
         const bool high = band == "high";
-        const bool session_active = calibration_.state == "active" &&
-            !calibration_.session_id.empty() && calibration_.band == band;
+        const bool session_active = calibration_step_available(calibration_) &&
+            calibration_.band == band;
 
         draw_box({x, table_y, table_width, table_height}, kPanel);
         draw_text_vcentered_clipped(high ? "高增益校准" : "低增益校准", x + 10,
                                     high ? kAmber : kCyan,
                                     {x + 10, table_y + 5, 120, 20}, font_bold_);
-        draw_text_vcentered_clipped(high ? "-60 至 -140 dBm" : "+10 至 -70 dBm",
+        draw_text_vcentered_clipped(high ? "-60 至 -140 dBm" : "0 至 -80 dBm",
                                     x + 136, kMuted,
                                     {x + 136, table_y + 7, 188, 18}, font_small_);
         draw_text_vcentered_clipped("dBm", x + 12, kMuted,
@@ -2009,7 +2108,7 @@ private:
                 const int value_x = x + first_value_x_offset + rx * value_width;
                 const bool current_point = session_active &&
                     calibration_.rx_channel == rx &&
-                    calibration_.next_input_dbm == input;
+                    *calibration_.next_input_dbm == input;
                 draw_box({value_x, row_y, value_width - 4, 16},
                          current_point ? kCyan : kDark);
                 const auto found = calibration_.column_points[
@@ -2051,14 +2150,16 @@ private:
              << (receiver.snr_valid ? receiver.snr_db : 0.0) << " dB";
         draw_text_clipped(receiver.rssi_valid ? live.str() : "RX --", 104, 86, kCyan,
                           {104, 82, 300, 24}, font_small_);
+        const bool calibration_selection_enabled = controls_enabled() &&
+            calibration_.session_id.empty();
         add_button({24, 112, 76, 30}, "RX1", calibration_.rx_channel == 0 ? kCyan : kDark,
-                   [this] { select_calibration_column(calibration_.selected_column % 2); }, controls_enabled());
+                    [this] { select_calibration_column(calibration_.selected_column % 2); }, calibration_selection_enabled);
         add_button({108, 112, 76, 30}, "RX2", calibration_.rx_channel == 1 ? kCyan : kDark,
-                   [this] { select_calibration_column(2 + calibration_.selected_column % 2); }, controls_enabled());
+                    [this] { select_calibration_column(2 + calibration_.selected_column % 2); }, calibration_selection_enabled);
         add_button({196, 112, 76, 30}, "低档", calibration_.band == "low" ? kCyan : kDark,
-                   [this] { select_calibration_column(calibration_.rx_channel * 2); }, controls_enabled());
+                    [this] { select_calibration_column(calibration_.rx_channel * 2); }, calibration_selection_enabled);
         add_button({280, 112, 76, 30}, "高档", calibration_.band == "high" ? kCyan : kDark,
-                   [this] { select_calibration_column(calibration_.rx_channel * 2 + 1); }, controls_enabled());
+                    [this] { select_calibration_column(calibration_.rx_channel * 2 + 1); }, calibration_selection_enabled);
         const int column = calibration_.selected_column;
         const int gain = calibration_.band == "low" ? 0 :
             calibration_.column_gain[static_cast<std::size_t>(column)].value_or(
@@ -2067,20 +2168,23 @@ private:
         draw_text(gain_text(gain), 464, 86, kCyan, font_bold_);
         add_button({386, 112, 68, 30}, "自动", kDark,
                    [this] { auto_calibration_gain(); },
-                   controls_enabled() && calibration_.band == "high");
+                   calibration_selection_enabled && calibration_.band == "high");
         add_button({462, 112, 46, 30}, "-", kDark,
                    [this] { set_calibration_gain(-10); },
-                   controls_enabled() && calibration_.band == "high");
+                   calibration_selection_enabled && calibration_.band == "high");
         add_button({514, 112, 46, 30}, "+", kDark,
                    [this] { set_calibration_gain(10); },
-                   controls_enabled() && calibration_.band == "high");
+                   calibration_selection_enabled && calibration_.band == "high");
         draw_text_clipped(calibration_.band == "low" ? "低档固定 0.0 dB" :
                           "高档会话增益 " + gain_text(gain), 572, 116, kMuted,
                           {572, 112, 198, 30}, font_small_);
         add_button({24, 150, 90, 30}, "开始", kGreen,
-                   [this] { begin_selected_calibration(); }, controls_enabled());
-        add_button({120, 150, 90, 30}, "提交", calibration_.state == "active" ? kGreen : kDark,
-                   [this] { step_rx_calibration(); }, controls_enabled());
+                   [this] { begin_selected_calibration(); },
+                   controls_enabled() && calibration_.session_id.empty());
+        const bool step_available = calibration_step_available(calibration_);
+        add_button({120, 150, 90, 30}, "提交", step_available ? kCyan : kDark,
+                   [this] { step_rx_calibration(); },
+                   controls_enabled() && step_available);
         add_button({216, 150, 90, 30}, "保存",
                    calibration_.completed_points == 9 ? kGreen : kDark,
                    [this] { save_rx_calibration(); },
@@ -2090,7 +2194,12 @@ private:
                    [this] { cancel_rx_calibration(); }, controls_enabled());
         std::ostringstream status;
         status << "CAL " << calibration_.state << "  " << calibration_.completed_points
-               << "点  下一个 " << calibration_.next_input_dbm << " dBm";
+               << "点  下一个 ";
+        if (calibration_.next_input_dbm) {
+            status << *calibration_.next_input_dbm << " dBm";
+        } else {
+            status << "--";
+        }
         draw_text_clipped(status.str(), 416, 154, kMuted, {416, 150, 350, 30}, font_small_);
 
         draw_calibration_table("low", kLowCalibrationInputDbm, 24);
@@ -2354,6 +2463,7 @@ private:
     RuntimeState state_;
     CalibrationUiState calibration_;
     std::map<std::string, std::string> pending_;
+    std::map<std::string, std::chrono::steady_clock::time_point> pending_sent_at_;
     std::map<std::string, Channel> channels_;
     std::map<std::string, std::string> channel_requests_;
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
@@ -2373,9 +2483,12 @@ private:
     bool calibration_exit_after_save_ = false;
     bool calibration_exit_after_discard_ = false;
     int calibration_exit_target_page_ = 3;
+    bool qa_view_enabled_ = false;
     std::chrono::steady_clock::time_point active_call_started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point gui_started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point next_calibration_query_{};
+    std::chrono::steady_clock::time_point calibration_query_sent_at_{};
+    std::chrono::steady_clock::time_point last_connection_attempt_{};
     bool ui_locked_ = false;
 };
 

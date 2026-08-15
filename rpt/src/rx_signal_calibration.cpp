@@ -14,7 +14,7 @@
 namespace dmr_rpt {
 namespace {
 
-const std::vector<int> kLowInputs{10, 0, -10, -20, -30, -40, -50, -60, -70};
+const std::vector<int> kLowInputs{0, -10, -20, -30, -40, -50, -60, -70, -80};
 const std::vector<int> kHighInputs{-60, -70, -80, -90, -100, -110, -120, -130, -140};
 
 const RxSignalCalibrationCurve* curve_for(const RxSignalCalibrationConfig& config,

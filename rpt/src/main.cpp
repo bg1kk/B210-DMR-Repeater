@@ -1054,8 +1054,16 @@ int run_session(dmr_rpt::B210SessionFactory& factory,
                     active_validated = validated;
                     calibration->replace(candidate.radio.rx_signal_calibration);
                     restore_forwarding();
-                    set_calibration_state(calibration_state_json(
-                        nullptr, "committed"));
+                    std::ostringstream committed_state;
+                    committed_state << "{\"state\":\"committed\","
+                        << "\"config_written\":true,\"rx_channel\":"
+                        << calibration_session->rx_channel
+                        << ",\"band\":\""
+                        << dmr_rpt::to_string(calibration_session->band)
+                        << "\",\"rx_gain_tenths_db\":"
+                        << calibration_session->gain_tenths_db
+                        << ",\"completed_points\":9}";
+                    set_calibration_state(committed_state.str());
                     audit.emit({"CAL", "rx_calibration.committed", "commit",
                                 "ok", validated.semantic_sha256,
                                 {{"rx_channel", std::to_string(

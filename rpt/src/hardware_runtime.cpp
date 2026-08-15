@@ -2033,6 +2033,10 @@ public:
             source_ = gr::uhd::usrp_source::make(
                 ::uhd::device_addr_t(rf.radio.uhd_device), rx_args);
         });
+        uhd_step("disable B210 RX hardware AGC", [&] {
+            source_->set_rx_agc(false, rx_stream_channel);
+            if (afm_enabled) source_->set_rx_agc(false, afm_stream_channel);
+        });
         uhd_step("set RX sample rate", [&] {
             source_->set_samp_rate(kUsrpRate);
             require_precision(kUsrpRate, source_->get_samp_rate(), 0.5,
@@ -2637,6 +2641,7 @@ public:
         }
         try {
             const double requested = gain_tenths_db / 10.0;
+            source_->set_rx_agc(false, stream->second);
             source_->set_gain(requested, stream->second);
             const double applied = source_->get_gain(stream->second);
             require_precision(requested, applied, 0.05, "RX gain");
