@@ -20,6 +20,7 @@ This copyright statement must be retained.
 - `CMakeLists.txt`：可在本目录独立生成 Unix Makefiles 的构建入口。
 - `SOURCE_STRUCTURE.md`：模块调用关系、各源文件职责和编译步骤。
 - `AGC_RSSI_RANGE_REPORT.md`：硬件 AGC、模拟增益补偿和 80dB RSSI 范围验收方法。
+- `B210_RX_GAIN_CHAIN_REPORT.md`：B210/AD9361 接收增益链、各级范围和软件控制边界。
 - 工程根目录的 `CMakeLists.txt`、`cmake/`、`deploy/`、`gr-dmr/`、`test-vectors/` 是编译、部署及射频处理所需的配套文件，不在本目录重复保存。
 
 ## 3. 主要实现方法

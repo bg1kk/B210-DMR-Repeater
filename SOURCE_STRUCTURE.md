@@ -16,6 +16,7 @@ source/
   CMakeLists.txt             独立 CMake 构建入口
   VERSION                    应用版本号
   AGC_RSSI_RANGE_REPORT.md   AGC 补偿与 RSSI 范围报告
+  B210_RX_GAIN_CHAIN_REPORT.md B210/AD9361 接收增益链报告
   rpt/                       转发器和 DMR 信号处理源码
     include/dmr_rpt/         转发控制平面接口
     include/dmr_b210/        GNU Radio 帧采样和帧构造接口
