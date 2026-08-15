@@ -11,7 +11,7 @@ This copyright statement must be retained.
 
 本项目实现运行于 Raspberry Pi 5 的 USRP B210 DMR 数字转发器及本地触摸屏控制终端。系统接收 VHF/UHF DMR 信号，透明转发原始 DMR 帧到配置的 DMR 发射频点；可选接收带 CTCSS 的模拟 FM 信号，并以固定源 ID `9999`、全呼目标 ID `16777215` 转发为 DMR。程序同时记录通话音频为 MP3，并通过 UDP 向 GUI 提供实时运行状态和控制能力。
 
-源码目标版本：`V1.1.0`。Pi5 当前已部署基线仍为 `V1.0.7 B154`；完成三档集成、构建和实机校准前不得把 V1.1.0 标记为已部署。
+源码与Pi5部署版本：`V1.2.0 B156`。三档固定增益、前级四档配置/状态协议和S1=-121 dBm显示已完成构建部署；绝对dBm仍须完成现场全点校准后才有效。
 
 ## 2. 源码目录
 
@@ -22,6 +22,7 @@ This copyright statement must be retained.
 - `AGC_RSSI_RANGE_REPORT.md`：硬件 AGC、模拟增益补偿和 80dB RSSI 范围验收方法。
 - `B210_RX_GAIN_CHAIN_REPORT.md`：B210/AD9361 接收增益链、各级范围和软件控制边界。
 - `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md`：新契约的内部三档固定 Gain、-125..-20 dBm 校准链路、弱端12 dB SNR、噪声扣除、削顶保护和两/三档比较。
+- `FRONTEND_CONDITIONING_CALIBRATION.md`：三档各四组前级衰减、IO4/IO5档位码、天线参考面RSSI换算和S1=-121 dBm基准。
 - `WIDE_DYNAMIC_RANGE_RSSI_PROTECTION_DESIGN.md`：140dB输入范围的外部量程、绝对RSSI与强信号保护方案。
 - 工程根目录的 `CMakeLists.txt`、`cmake/`、`deploy/`、`gr-dmr/`、`test-vectors/` 是编译、部署及射频处理所需的配套文件，不在本目录重复保存。
 
@@ -30,7 +31,7 @@ This copyright statement must be retained.
 ### 射频与通话处理
 
 - GNU Radio 与 UHD 驱动 B210 双接收、DMR 发射链路。
-- 当前 V1.0.7 B154 基线仍是旧硬件 AGC/两档补偿实现；下一版契约目标是校准和正常工作均关闭硬件 AGC，使用 low/medium/high 三档固定模拟 Gain、原始 IQ噪声扣除和削顶保护，详见 `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md`。
+- V1.2.0 B156校准和正常工作均关闭硬件AGC，使用low/medium/high三档固定模拟Gain；部署默认选择medium=25 dB。前级调理未完成实测前保持禁用。
 - DMR 使用直接帧转发：接收端通过同步、色码、时隙与呼叫类型检查后，原始突发帧按接收时钟节奏送到发射链路，不进行 AMBE 解码再编码。
 - AMBE 仅进入独立录音分支，使用 mbelib 解码为 PCM，再由 LAME 编码为单声道 8 kHz、16 kbps MP3。
 - FM 分支独立检测 CTCSS；CTCSS 由各信道配置，未配置时使用 123.0 Hz。FM 音频一路进入 DMR AMBE 编码与发射，另一路进入 MP3 录音。
@@ -163,6 +164,14 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 - 校准核心增加 low/medium/high 三档，点数为 8/9/11；high 扩展至 -125 dBm并要求匹配滤波后 SNR >=12 dB。
 - 校准顺序改为弱到强，稳定门限改为10个样本、0.8 dB跨度；YAML持久化和UDP `range`字段支持 medium。
 - 增加两档与三档定量比较；默认保留三档。该版本尚未完成Pi5构建和实机校准，不是已部署发布。
+
+### V1.2.0 B156, 2026-08-16
+
+- low/medium/high固定模拟Gain为0/25/50 dB，校准点分别为8/9/11点，高档扩展至-125 dBm且要求SNR不低于12 dB。
+- 每档预留stage0..stage3四组前级衰减，stage0固定0 dB；IO4/IO5使用一次掩码写输出00/01/10/11。
+- UDP状态增加B210端口RSSI、前级stage/衰减/GPIO码/健康字段；天线参考面RSSI加上实测前级衰减。
+- 校准有效时GUI固定S1=-121 dBm、S9=-73 dBm；未校准继续显示dBFS。
+- Pi5完整构建及10/10 CTest通过，转发器和GUI服务均已部署运行；外部前级未接入和实测前保持disabled。
 
 ### V1.0.7 B154, 2026-08-15
 

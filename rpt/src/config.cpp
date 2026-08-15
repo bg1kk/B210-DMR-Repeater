@@ -341,6 +341,9 @@ ReceiveGainControlConfig parse_receive_gain_control(const YAML::Node& radio)
     gain_control.high_gain_tenths_db = get_tenths_default(
         node, "high_gain_db", gain_control.high_gain_tenths_db,
         "radio.receive_gain_control");
+    gain_control.medium_gain_tenths_db = get_tenths_default(
+        node, "medium_gain_db", gain_control.medium_gain_tenths_db,
+        "radio.receive_gain_control");
     gain_control.low_gain_tenths_db = get_tenths_default(
         node, "low_gain_db", gain_control.low_gain_tenths_db,
         "radio.receive_gain_control");
@@ -378,6 +381,70 @@ double get_double(const YAML::Node& node, const char* key,
         throw ConfigError(context + "." + key + " must be a number: " +
                           error.what());
     }
+}
+
+std::array<double, 4> parse_frontend_attenuation(
+    const YAML::Node& node, const std::string& context,
+    const std::array<double, 4>& defaults)
+{
+    if (!node) {
+        return defaults;
+    }
+    require_sequence(node, context);
+    if (node.size() != 4U) {
+        throw ConfigError(context + " must contain exactly four values");
+    }
+    std::array<double, 4> values{};
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        try {
+            values[index] = node[index].as<double>();
+        } catch (const YAML::Exception& error) {
+            throw ConfigError(context + " contains a non-number: " +
+                              error.what());
+        }
+    }
+    return values;
+}
+
+RxFrontendConditioningConfig parse_rx_frontend_conditioning(
+    const YAML::Node& radio)
+{
+    RxFrontendConditioningConfig frontend;
+    const YAML::Node node = radio["rx_frontend_conditioning"];
+    if (!node) {
+        return frontend;
+    }
+    require_map(node, "radio.rx_frontend_conditioning");
+    frontend.enabled = get_bool_default(node, "enabled", frontend.enabled);
+    frontend.gpio_bank = get_string_default(
+        node, "gpio_bank", frontend.gpio_bank);
+    frontend.stage_bit0_io = get_int_default(
+        node, "stage_bit0_io", frontend.stage_bit0_io,
+        "radio.rx_frontend_conditioning");
+    frontend.stage_bit1_io = get_int_default(
+        node, "stage_bit1_io", frontend.stage_bit1_io,
+        "radio.rx_frontend_conditioning");
+    frontend.default_stage = get_int_default(
+        node, "default_stage", frontend.default_stage,
+        "radio.rx_frontend_conditioning");
+    const YAML::Node attenuation = node["attenuation_db"];
+    if (attenuation) {
+        require_map(attenuation,
+                    "radio.rx_frontend_conditioning.attenuation_db");
+        frontend.low_attenuation_db = parse_frontend_attenuation(
+            attenuation["low"],
+            "radio.rx_frontend_conditioning.attenuation_db.low",
+            frontend.low_attenuation_db);
+        frontend.medium_attenuation_db = parse_frontend_attenuation(
+            attenuation["medium"],
+            "radio.rx_frontend_conditioning.attenuation_db.medium",
+            frontend.medium_attenuation_db);
+        frontend.high_attenuation_db = parse_frontend_attenuation(
+            attenuation["high"],
+            "radio.rx_frontend_conditioning.attenuation_db.high",
+            frontend.high_attenuation_db);
+    }
+    return frontend;
 }
 
 RxSignalCalibrationCurve parse_rx_calibration_curve(const YAML::Node& node,
@@ -652,18 +719,18 @@ RepeaterConfig parse_root(const YAML::Node& root)
     require_map(root, "root");
     RepeaterConfig config;
     config.contract_versions = {
-        {"RF", "0.12.4"},
+        {"RF", "1.1.0"},
         {"AIR", "0.6.2"},
         {"RPT", "0.7.0"},
         {"AUDIO", "0.3.4"},
         {"DATA", "0.3.8"},
-        {"NET", "0.4.6"},
+        {"NET", "1.1.0"},
         {"SAFE", "0.4.5"},
         {"UDP", "0.12.3"},
-        {"CAL", "0.3.1"},
+        {"CAL", "2.0.0"},
         {"AFM", "0.2.5"},
         {"LOG", "0.3.2"},
-        {"IO", "0.1.0"},
+        {"IO", "0.2.0"},
     };
     config.version = get_int(root, "version", "root");
 
@@ -682,6 +749,8 @@ RepeaterConfig parse_root(const YAML::Node& root)
         get_string(radio, "active_channel_profile_id", "radio");
     config.radio.receive_agc = parse_receive_agc(radio);
     config.radio.receive_gain_control = parse_receive_gain_control(radio);
+    config.radio.rx_frontend_conditioning =
+        parse_rx_frontend_conditioning(radio);
     config.radio.rx_signal_calibration = parse_rx_signal_calibration(radio);
 
     config.io_status = parse_io_status(root);
@@ -1184,7 +1253,7 @@ void persist_rx_signal_calibration(
 
 bool is_selectable_receive_gain_mode(const std::string& mode)
 {
-    return mode == "high" || mode == "low";
+    return mode == "high" || mode == "medium" || mode == "low";
 }
 
 bool is_receive_gain_selection_mode(const std::string& mode)
@@ -1198,10 +1267,13 @@ std::int32_t receive_gain_tenths_db_for_mode(
     if (mode == "high") {
         return config.high_gain_tenths_db;
     }
+    if (mode == "medium") {
+        return config.medium_gain_tenths_db;
+    }
     if (mode == "low") {
         return config.low_gain_tenths_db;
     }
-    throw ConfigError("receive gain mode must be high or low");
+    throw ConfigError("receive gain mode must be high, medium, or low");
 }
 
 ValidatedConfig validate_config(const RepeaterConfig& config)
@@ -1236,7 +1308,8 @@ ValidatedConfig validate_config(const RepeaterConfig& config)
     const ReceiveGainControlConfig& gain_control =
         config.radio.receive_gain_control;
     if (gain_control.low_gain_tenths_db != 0 ||
-        gain_control.high_gain_tenths_db <= gain_control.low_gain_tenths_db ||
+        gain_control.medium_gain_tenths_db <= gain_control.low_gain_tenths_db ||
+        gain_control.high_gain_tenths_db <= gain_control.medium_gain_tenths_db ||
         (gain_control.default_mode != "configured" &&
          !is_receive_gain_selection_mode(gain_control.default_mode)) ||
         gain_control.automatic_switching.high_to_low_threshold_dbm != -70 ||
@@ -1244,6 +1317,37 @@ ValidatedConfig validate_config(const RepeaterConfig& config)
         gain_control.automatic_switching.high_to_low_threshold_dbm >=
             gain_control.automatic_switching.low_to_high_threshold_dbm) {
         throw ConfigError("radio.receive_gain_control parameters are invalid");
+    }
+    const RxFrontendConditioningConfig& frontend =
+        config.radio.rx_frontend_conditioning;
+    if (frontend.gpio_bank.empty() || frontend.stage_bit0_io < 0 ||
+        frontend.stage_bit0_io > 31 || frontend.stage_bit1_io < 0 ||
+        frontend.stage_bit1_io > 31 ||
+        frontend.stage_bit0_io == frontend.stage_bit1_io ||
+        frontend.default_stage < 0 || frontend.default_stage > 3) {
+        throw ConfigError("radio.rx_frontend_conditioning GPIO parameters are invalid");
+    }
+    for (const IoPinConfig& pin : config.io_status.pins) {
+        if (pin.io == frontend.stage_bit0_io ||
+            pin.io == frontend.stage_bit1_io) {
+            throw ConfigError(
+                "radio.rx_frontend_conditioning GPIO pins conflict with io_status");
+        }
+    }
+    for (const auto* values : {&frontend.low_attenuation_db,
+                               &frontend.medium_attenuation_db,
+                               &frontend.high_attenuation_db}) {
+        if ((*values)[0] != 0.0) {
+            throw ConfigError(
+                "radio.rx_frontend_conditioning stage0 must be 0 dB");
+        }
+        for (std::size_t index = 0; index < values->size(); ++index) {
+            if (!std::isfinite((*values)[index]) || (*values)[index] < 0.0 ||
+                (index > 0 && (*values)[index] <= (*values)[index - 1])) {
+                throw ConfigError(
+                    "radio.rx_frontend_conditioning attenuation values must be finite and strictly increasing");
+            }
+        }
     }
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
@@ -1485,6 +1589,7 @@ std::string canonical_config_summary(const RepeaterConfig& config)
         << ':' << config.radio.receive_agc.release_tenths_db_per_second << '\n';
     out << "radio.receive_gain_control="
         << config.radio.receive_gain_control.high_gain_tenths_db << ':'
+        << config.radio.receive_gain_control.medium_gain_tenths_db << ':'
         << config.radio.receive_gain_control.low_gain_tenths_db << ':'
         << config.radio.receive_gain_control.default_mode << ':'
         << (config.radio.receive_gain_control.automatic_switching.enabled ? "true" : "false")
@@ -1492,6 +1597,19 @@ std::string canonical_config_summary(const RepeaterConfig& config)
                       .high_to_low_threshold_dbm
         << ':' << config.radio.receive_gain_control.automatic_switching
                       .low_to_high_threshold_dbm << '\n';
+    const auto& frontend = config.radio.rx_frontend_conditioning;
+    out << "radio.rx_frontend_conditioning="
+        << (frontend.enabled ? 1 : 0) << ':' << frontend.gpio_bank << ':'
+        << frontend.stage_bit0_io << ':' << frontend.stage_bit1_io << ':'
+        << frontend.default_stage;
+    for (const auto* values : {&frontend.low_attenuation_db,
+                               &frontend.medium_attenuation_db,
+                               &frontend.high_attenuation_db}) {
+        for (double value : *values) {
+            out << ':' << value;
+        }
+    }
+    out << '\n';
     for (int channel = 0; channel < 2; ++channel) {
         const std::size_t index = static_cast<std::size_t>(channel);
         for (const auto band : {RxCalibrationBand::Low,

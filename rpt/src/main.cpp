@@ -301,6 +301,10 @@ std::string active_receive_gain_mode(const dmr_rpt::RepeaterConfig& config)
         return "high";
     }
     if (profile->dmr_rx.gain_tenths_db ==
+        gain_control.medium_gain_tenths_db) {
+        return "medium";
+    }
+    if (profile->dmr_rx.gain_tenths_db ==
         gain_control.low_gain_tenths_db) {
         return "low";
     }
@@ -341,6 +345,8 @@ std::string gain_control_json(const dmr_rpt::RepeaterConfig& config,
         << "\",\"active_mode\":\"" << active_mode
         << "\",\"high_gain_tenths_db\":"
         << gain_control.high_gain_tenths_db
+        << ",\"medium_gain_tenths_db\":"
+        << gain_control.medium_gain_tenths_db
         << ",\"low_gain_tenths_db\":"
         << gain_control.low_gain_tenths_db;
     if (profile != config.channel_profiles.end()) {
@@ -1381,7 +1387,7 @@ int main(int argc, char** argv)
                             command.gain_mode)) {
                         result.code = "bad_request";
                         result.message =
-                            "set_gain_mode requires gain_mode auto, high or low only";
+                            "set_gain_mode requires gain_mode auto, high, medium, or low only";
                         return result;
                     }
                     mailbox->push(command);

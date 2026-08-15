@@ -33,6 +33,9 @@ public:
     virtual GpioCapability capability(const std::string& bank) = 0;
     virtual bool configure_output(const std::string& bank, int pin) = 0;
     virtual bool write(const std::string& bank, int pin, IoLevel level) = 0;
+    virtual bool write_mask(const std::string& bank,
+                            std::uint32_t value,
+                            std::uint32_t mask) = 0;
 };
 
 struct IoPinRuntime {
@@ -83,6 +86,37 @@ private:
     IoStatusConfig config_;
     B210GpioAdapter& gpio_;
     IoStatusState state_;
+};
+
+struct FrontendStageState {
+    bool enabled = false;
+    int stage = 0;
+    int gpio_code = 0;
+    std::string b210_range = "low";
+    double attenuation_db = 0.0;
+    bool gpio_healthy = true;
+    std::string last_error;
+};
+
+class B210FrontendStageController {
+public:
+    B210FrontendStageController(RxFrontendConditioningConfig config,
+                                B210GpioAdapter& gpio);
+
+    void initialize(const std::string& b210_range = "low");
+    bool set_stage(const std::string& b210_range, int stage);
+    void release_stage_zero();
+    const FrontendStageState& state() const;
+
+private:
+    const std::array<double, 4>& attenuation_for(
+        const std::string& b210_range) const;
+    bool write_stage_code(int stage);
+    void fault(const std::string& message);
+
+    RxFrontendConditioningConfig config_;
+    B210GpioAdapter& gpio_;
+    FrontendStageState state_;
 };
 
 const char* to_string(IoLevel level);

@@ -273,14 +273,29 @@ public:
         }
     }
 
+    bool write_mask(const std::string& bank,
+                    std::uint32_t value,
+                    std::uint32_t mask) override
+    {
+        try {
+            source_->set_gpio_attr(bank, "OUT", value, mask, 0);
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
 private:
     gr::uhd::usrp_source::sptr source_;
 };
 
 class RuntimeIo {
 public:
-    RuntimeIo(IoStatusConfig config, B210GpioAdapter& adapter)
+    RuntimeIo(IoStatusConfig config,
+              RxFrontendConditioningConfig frontend_config,
+              B210GpioAdapter& adapter)
         : controller_(std::move(config), adapter)
+        , frontend_(std::move(frontend_config), adapter)
     {
     }
 
@@ -288,6 +303,23 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         controller_.initialize(monotonic_ms());
+        frontend_.initialize("low");
+        if (frontend_.state().enabled && !frontend_.state().gpio_healthy) {
+            throw std::runtime_error(
+                "frontend_gpio_fault: " + frontend_.state().last_error);
+        }
+    }
+
+    bool frontend_stage(const std::string& b210_range, int stage)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return frontend_.set_stage(b210_range, stage);
+    }
+
+    FrontendStageState frontend_state() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return frontend_.state();
     }
 
     void rx(int channel, bool active)
@@ -312,11 +344,13 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         controller_.release_all_high();
+        frontend_.release_stage_zero();
     }
 
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     B210IoStatusController controller_;
+    B210FrontendStageController frontend_;
 };
 
 class CtcssMonitorBlock final : public gr::sync_block {
@@ -2110,21 +2144,30 @@ public:
                     afm_stream_channel);
             });
         }
-        uhd_step("enable B210 RX hardware AGC", [&] {
-            source_->set_rx_agc(true, rx_stream_channel);
-            if (afm_enabled) source_->set_rx_agc(true, afm_stream_channel);
-        });
         {
             std::lock_guard<std::mutex> lock(rx_config_mutex_);
-            rx_hardware_agc_enabled_[rx.channel] = true;
+            rx_hardware_agc_enabled_[rx.channel] = false;
             if (afm_enabled) {
-                rx_hardware_agc_enabled_[afm.rx.channel] = true;
+                rx_hardware_agc_enabled_[afm.rx.channel] = false;
             }
         }
 
         gpio_ = std::make_unique<GnuradioB210GpioAdapter>(source_);
-        io_ = std::make_unique<RuntimeIo>(rf.io_status, *gpio_);
+        io_ = std::make_unique<RuntimeIo>(
+            rf.io_status, rf.radio.rx_frontend_conditioning, *gpio_);
         io_->initialize();
+        const auto& gain_control = rf.radio.receive_gain_control;
+        const std::string frontend_range =
+            rx.gain_tenths_db == gain_control.high_gain_tenths_db
+                ? "high"
+                : rx.gain_tenths_db == gain_control.medium_gain_tenths_db
+                    ? "medium" : "low";
+        if (!io_->frontend_stage(
+                frontend_range,
+                rf.radio.rx_frontend_conditioning.default_stage)) {
+            throw std::runtime_error(
+                "frontend_gpio_fault: failed to apply configured stage");
+        }
 
         recording_ = std::make_shared<AudioRecordingRuntime>(
             config_.config.logging.recording_directory,
@@ -2672,6 +2715,20 @@ public:
             rx_gain_tenths_db_[physical_rx_channel] = static_cast<std::int32_t>(
                 std::lround(applied * 10.0));
             rx_hardware_agc_enabled_[physical_rx_channel] = false;
+            if (io_) {
+                const auto& gain_control =
+                    config_.config.radio.receive_gain_control;
+                const std::string range =
+                    gain_tenths_db == gain_control.high_gain_tenths_db
+                        ? "high"
+                        : gain_tenths_db == gain_control.medium_gain_tenths_db
+                            ? "medium" : "low";
+                const int stage = io_->frontend_state().stage;
+                if (!io_->frontend_stage(range, stage)) {
+                    error = "frontend_gpio_fault: failed to update range";
+                    return false;
+                }
+            }
             return true;
         } catch (const std::exception& exception) {
             error = exception.what();
@@ -2682,6 +2739,10 @@ public:
     bool set_rx_hardware_agc(int physical_rx_channel, bool enabled,
                              std::string& error) override
     {
+        if (enabled) {
+            error = "B210 hardware AGC is disabled by the three-range calibration contract";
+            return false;
+        }
         std::lock_guard<std::mutex> lock(rx_config_mutex_);
         const auto stream = rx_stream_channels_.find(physical_rx_channel);
         if (!source_ || stream == rx_stream_channels_.end()) {
@@ -2713,6 +2774,23 @@ private:
         ReceiveStatus& status, int physical_rx_channel,
         const std::shared_ptr<ReceiveAgcTelemetry>& telemetry) const
     {
+        status.b210_port_rssi_dbm = status.rssi_dbm;
+        if (io_) {
+            const FrontendStageState frontend = io_->frontend_state();
+            status.frontend_stage = frontend.stage;
+            status.frontend_attenuation_db = frontend.attenuation_db;
+            status.frontend_gpio_code = frontend.gpio_code;
+            status.frontend_gpio_healthy = frontend.gpio_healthy;
+            if (status.rssi_dbm) {
+                if (frontend.gpio_healthy) {
+                    *status.rssi_dbm += frontend.attenuation_db;
+                } else {
+                    status.rssi_dbm.reset();
+                    status.b210_port_rssi_dbm.reset();
+                    status.calibration_state = "frontend_gpio_fault";
+                }
+            }
+        }
         status.hardware_agc_enabled =
             current_rx_hardware_agc_enabled(physical_rx_channel);
         status.analog_gain_db = current_rx_gain(physical_rx_channel) / 10.0;

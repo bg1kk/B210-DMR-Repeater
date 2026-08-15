@@ -5,6 +5,7 @@
 // This copyright statement must be retained.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -104,7 +105,8 @@ struct ReceiveAgcConfig {
 };
 
 struct ReceiveGainControlConfig {
-    std::int32_t high_gain_tenths_db = 250;
+    std::int32_t high_gain_tenths_db = 500;
+    std::int32_t medium_gain_tenths_db = 250;
     std::int32_t low_gain_tenths_db = 0;
     std::string default_mode = "auto";
     struct AutomaticSwitchingConfig {
@@ -112,6 +114,17 @@ struct ReceiveGainControlConfig {
         int high_to_low_threshold_dbm = -70;
         int low_to_high_threshold_dbm = -60;
     } automatic_switching;
+};
+
+struct RxFrontendConditioningConfig {
+    bool enabled = false;
+    std::string gpio_bank = "FP0";
+    int stage_bit0_io = 4;
+    int stage_bit1_io = 5;
+    int default_stage = 0;
+    std::array<double, 4> low_attenuation_db{0.0, 10.0, 20.0, 30.0};
+    std::array<double, 4> medium_attenuation_db{0.0, 10.0, 20.0, 30.0};
+    std::array<double, 4> high_attenuation_db{0.0, 10.0, 20.0, 30.0};
 };
 
 struct RadioConfig {
@@ -124,6 +137,7 @@ struct RadioConfig {
     std::string active_channel_profile_id;
     ReceiveAgcConfig receive_agc;
     ReceiveGainControlConfig receive_gain_control;
+    RxFrontendConditioningConfig rx_frontend_conditioning;
     RxSignalCalibrationConfig rx_signal_calibration;
 };
 

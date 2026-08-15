@@ -68,7 +68,7 @@ public:
         if (bank != "FP0") {
             return {bank, {}, {}};
         }
-        return {"FP0", {0, 1, 2, 3}, {0, 1, 2, 3}};
+        return {"FP0", {0, 1, 2, 3, 4, 5}, {0, 1, 2, 3, 4, 5}};
     }
 
     bool configure_output(const std::string&, int pin) override
@@ -87,10 +87,28 @@ public:
         return true;
     }
 
+    bool write_mask(const std::string&, std::uint32_t value,
+                    std::uint32_t mask) override
+    {
+        masked_writes.push_back({value, mask});
+        if (fail_write) {
+            return false;
+        }
+        for (int pin = 0; pin < 32; ++pin) {
+            const std::uint32_t bit = std::uint32_t{1} << pin;
+            if ((mask & bit) != 0U) {
+                levels[pin] = (value & bit) != 0U
+                    ? dmr_rpt::IoLevel::High : dmr_rpt::IoLevel::Low;
+            }
+        }
+        return true;
+    }
+
     bool fail_configure = false;
     bool fail_write = false;
     std::vector<int> configured;
     std::vector<std::pair<int, dmr_rpt::IoLevel>> writes;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> masked_writes;
     std::map<int, dmr_rpt::IoLevel> levels;
 };
 
@@ -174,7 +192,8 @@ void test_config(const std::filesystem::path& config_path)
                 validated.config.radio.receive_agc.attack_tenths_db_per_second == 6000 &&
                 validated.config.radio.receive_agc.release_tenths_db_per_second == 1200,
             "receive AGC default profile is configured");
-    require(validated.config.radio.receive_gain_control.high_gain_tenths_db == 250 &&
+    require(validated.config.radio.receive_gain_control.high_gain_tenths_db == 500 &&
+                validated.config.radio.receive_gain_control.medium_gain_tenths_db == 250 &&
                 validated.config.radio.receive_gain_control.low_gain_tenths_db == 0 &&
                 validated.config.radio.receive_gain_control.default_mode == "auto" &&
                 validated.config.radio.receive_gain_control.automatic_switching.enabled &&
@@ -183,17 +202,23 @@ void test_config(const std::filesystem::path& config_path)
                 validated.config.radio.receive_gain_control.automatic_switching
                     .low_to_high_threshold_dbm == -60,
             "receive gain control defaults are configured");
+    require(!validated.config.radio.rx_frontend_conditioning.enabled &&
+                validated.config.radio.rx_frontend_conditioning.stage_bit0_io == 4 &&
+                validated.config.radio.rx_frontend_conditioning.stage_bit1_io == 5 &&
+                validated.config.radio.rx_frontend_conditioning.low_attenuation_db[0] == 0.0,
+            "frontend conditioning defaults reserve IO4/IO5 safely");
     require(!validated.config.data.enabled,
             "DMR data decode, relay, and active send remain disabled");
-    require(validated.config.contract_versions.at("RF") == "0.12.4" &&
+    require(validated.config.contract_versions.at("RF") == "1.1.0" &&
                 validated.config.contract_versions.at("AIR") == "0.6.2" &&
                 validated.config.contract_versions.at("RPT") == "0.7.0" &&
-                validated.config.contract_versions.at("NET") == "0.4.6" &&
+                validated.config.contract_versions.at("NET") == "1.1.0" &&
                 validated.config.contract_versions.at("UDP") == "0.12.3" &&
-                validated.config.contract_versions.at("CAL") == "0.3.1" &&
+                validated.config.contract_versions.at("CAL") == "2.0.0" &&
                 validated.config.contract_versions.at("SAFE") == "0.4.5" &&
                 validated.config.contract_versions.at("AFM") == "0.2.5" &&
-                validated.config.contract_versions.at("LOG") == "0.3.2",
+                validated.config.contract_versions.at("LOG") == "0.3.2" &&
+                validated.config.contract_versions.at("IO") == "0.2.0",
             "runtime contract versions are current");
     require(validated.config.tcp_status.protocol == "dmr-rpt-tcp/1" &&
                 validated.config.tcp_status.interval_ms == 1000,
@@ -369,9 +394,9 @@ void test_config(const std::filesystem::path& config_path)
 
     bad = config;
     bad.radio.receive_gain_control.high_gain_tenths_db =
-        bad.radio.receive_gain_control.low_gain_tenths_db;
+        bad.radio.receive_gain_control.medium_gain_tenths_db;
     require_config_error([&]() { dmr_rpt::validate_config(bad); },
-                         "receive gain control high/low order");
+                         "receive gain control high/medium order");
 
     bad = config;
     bad.radio.receive_gain_control.low_gain_tenths_db = 10;
@@ -379,14 +404,28 @@ void test_config(const std::filesystem::path& config_path)
                          "automatic receive low gain is fixed at zero");
 
     require(dmr_rpt::receive_gain_tenths_db_for_mode(
-                config.radio.receive_gain_control, "high") == 250 &&
+                config.radio.receive_gain_control, "high") == 500 &&
+                dmr_rpt::receive_gain_tenths_db_for_mode(
+                    config.radio.receive_gain_control, "medium") == 250 &&
                 dmr_rpt::receive_gain_tenths_db_for_mode(
                     config.radio.receive_gain_control, "low") == 0,
             "receive gain modes resolve configured gains");
     require(dmr_rpt::is_receive_gain_selection_mode("auto") &&
                 dmr_rpt::is_receive_gain_selection_mode("high") &&
+                dmr_rpt::is_receive_gain_selection_mode("medium") &&
                 !dmr_rpt::is_receive_gain_selection_mode("custom"),
-            "receive gain selection permits auto, high and low only");
+            "receive gain selection permits auto and three fixed ranges");
+
+    bad = config;
+    bad.radio.rx_frontend_conditioning.low_attenuation_db[0] = 1.0;
+    require_config_error([&]() { dmr_rpt::validate_config(bad); },
+                         "frontend stage zero is fixed at zero dB");
+
+    bad = config;
+    bad.radio.rx_frontend_conditioning.high_attenuation_db[2] =
+        bad.radio.rx_frontend_conditioning.high_attenuation_db[1];
+    require_config_error([&]() { dmr_rpt::validate_config(bad); },
+                         "frontend attenuation values are strictly increasing");
 
     bad = config;
     bad.radio.receive_gain_control.automatic_switching
@@ -768,6 +807,28 @@ void test_io(const dmr_rpt::IoStatusConfig& config)
     dmr_rpt::B210IoStatusController bad(config, bad_gpio);
     bad.initialize(0);
     require(!bad.state().gpio_healthy, "GPIO write failure enters fault");
+
+    dmr_rpt::RxFrontendConditioningConfig frontend_config;
+    frontend_config.enabled = true;
+    FakeGpio frontend_gpio;
+    dmr_rpt::B210FrontendStageController frontend(
+        frontend_config, frontend_gpio);
+    frontend.initialize("low");
+    require(frontend.state().gpio_healthy && frontend.state().stage == 3 &&
+                frontend.state().attenuation_db == 30.0,
+            "frontend starts in the maximum attenuation stage");
+    require(frontend_gpio.masked_writes.size() == 1U &&
+                frontend_gpio.masked_writes.back().first ==
+                    ((std::uint32_t{1} << 4) | (std::uint32_t{1} << 5)),
+            "frontend stage uses one atomic masked GPIO write");
+    require(frontend.set_stage("medium", 2) &&
+                frontend.state().gpio_code == 2 &&
+                frontend.state().attenuation_db == 20.0,
+            "frontend stage and range select the configured attenuation");
+    frontend.release_stage_zero();
+    require(frontend.state().stage == 0 &&
+                frontend.state().attenuation_db == 0.0,
+            "frontend releases to fixed stage zero");
 }
 
 void test_audit(const dmr_rpt::LoggingConfig& config)

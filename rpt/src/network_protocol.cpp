@@ -787,6 +787,8 @@ struct UdpControlServer::Impl {
                 ? status.status.snr_db : std::nullopt;
             const std::optional<double> rssi_dbm = fresh
                 ? status.status.rssi_dbm : std::nullopt;
+            const std::optional<double> b210_port_rssi_dbm = fresh
+                ? status.status.b210_port_rssi_dbm : std::nullopt;
             const std::optional<double> analog_gain_db = fresh
                 ? status.status.analog_gain_db : std::nullopt;
             const std::optional<double> software_agc_gain_db = fresh
@@ -802,6 +804,8 @@ struct UdpControlServer::Impl {
             out << "{\"rx_channel\":" << status.status.rx_channel
                 << ",\"receiving\":" << (receiving ? "true" : "false")
                 << ",\"rssi_dbfs\":" << optional_double_json(rssi)
+                << ",\"b210_port_rssi_dbm\":"
+                << optional_double_json(b210_port_rssi_dbm)
                 << ",\"rssi_dbm\":" << optional_double_json(rssi_dbm)
                 << ",\"snr_db\":" << optional_double_json(snr)
                 << ",\"hardware_agc_enabled\":"
@@ -814,6 +818,14 @@ struct UdpControlServer::Impl {
                 << optional_double_json(agc_input_dbfs)
                 << ",\"rssi_gain_compensation_db\":"
                 << optional_double_json(rssi_gain_compensation_db)
+                << ",\"frontend_stage\":"
+                << status.status.frontend_stage
+                << ",\"frontend_attenuation_db\":"
+                << status.status.frontend_attenuation_db
+                << ",\"frontend_gpio_code\":"
+                << status.status.frontend_gpio_code
+                << ",\"frontend_gpio_healthy\":"
+                << (status.status.frontend_gpio_healthy ? "true" : "false")
                 << ",\"receiver_mode\":"
                 << json_string(status.status.receiver_mode)
                 << ",\"calibration_state\":"

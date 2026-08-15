@@ -136,6 +136,16 @@ if(DMR_B210_SOURCE_BUILD_RPT)
             -Wall -Wextra -Wpedantic)
         add_test(NAME rx_signal_calibration_tests
             COMMAND rx_signal_calibration_tests)
+        add_executable(frontend_conditioning_tests
+            rpt/tests/frontend_conditioning_tests.cpp
+            rpt/src/io_status.cpp)
+        target_compile_features(frontend_conditioning_tests PRIVATE cxx_std_17)
+        target_include_directories(frontend_conditioning_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/rpt/include)
+        target_compile_options(frontend_conditioning_tests PRIVATE
+            -Wall -Wextra -Wpedantic)
+        add_test(NAME frontend_conditioning_tests
+            COMMAND frontend_conditioning_tests)
         if(EXISTS "${DMR_B210_REPEATER_EXAMPLE_CONFIG}" AND
            IS_DIRECTORY "${DMR_B210_REPEATER_VECTOR_ROOT}")
             add_test(NAME repeater_contract_tests
