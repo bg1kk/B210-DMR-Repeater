@@ -11,7 +11,7 @@ This copyright statement must be retained.
 
 本项目实现运行于 Raspberry Pi 5 的 USRP B210 DMR 数字转发器及本地触摸屏控制终端。系统接收 VHF/UHF DMR 信号，透明转发原始 DMR 帧到配置的 DMR 发射频点；可选接收带 CTCSS 的模拟 FM 信号，并以固定源 ID `9999`、全呼目标 ID `16777215` 转发为 DMR。程序同时记录通话音频为 MP3，并通过 UDP 向 GUI 提供实时运行状态和控制能力。
 
-源码与Pi5部署版本：`V1.2.1 B163`。该版本将活动信道和快捷信道列表持久化到配置文件，快捷信道按信道号升序显示，GUI主页使用25号专用粗体分栏显示RX/TX频率；切换信道期间屏蔽旧状态回滚和重复触摸，主页与信道页按权威状态同步；IO4/IO5继续明确为读取外部前级档位的输入，绝对dBm仍须完成现场全点校准后才有效。
+源码与Pi5部署版本：`V1.2.1 B164`。该版本将活动信道和快捷信道列表持久化到配置文件，快捷信道按信道号升序显示，GUI主页的频率数字使用DashLCDSegment数码字体并与RX/TX标签、MHz单位分栏显示；转发运行状态前的圆点在运行时显示红色、待机时显示背景色；切换信道期间屏蔽旧状态回滚和重复触摸，主页与信道页按权威状态同步；IO4/IO5继续明确为读取外部前级档位的输入，绝对dBm仍须完成现场全点校准后才有效。
 
 ## 2. 源码目录
 
@@ -24,6 +24,7 @@ This copyright statement must be retained.
 - `INTERNAL_THREE_RANGE_RSSI_CALIBRATION_PLAN.md`：新契约的内部三档固定 Gain、-125..-20 dBm 校准链路、弱端12 dB SNR、噪声扣除、削顶保护和两/三档比较。
 - `FRONTEND_CONDITIONING_CALIBRATION.md`：三档各四组前级衰减、IO4/IO5输入档位码、天线参考面RSSI换算和S1=-121 dBm基准。
 - `WIDE_DYNAMIC_RANGE_RSSI_PROTECTION_DESIGN.md`：140dB输入范围的外部量程、绝对RSSI与强信号保护方案。
+- `assets/fonts/DashLCDSegment-Regular.ttf`：主页频率数字专用字体资源；部署后安装到 `/opt/dmr-rpt/share/fonts/`。
 - 工程根目录的 `CMakeLists.txt`、`cmake/`、`deploy/`、`gr-dmr/`、`test-vectors/` 是编译、部署及射频处理所需的配套文件，不在本目录重复保存。
 
 ## 3. 主要实现方法

@@ -81,6 +81,8 @@ struct GuiConfig {
     bool framebuffer_direct_output = false;
     std::string font_path =
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+    std::string frequency_digit_font_path =
+        "/opt/dmr-rpt/share/fonts/DashLCDSegment-Regular.ttf";
     std::array<double, 2> s9_reference_dbfs{-87.0, -87.0};
     std::vector<std::string> profile_ids;
     std::vector<std::string> quick_profile_ids;
@@ -190,6 +192,9 @@ GuiConfig load_config(const std::filesystem::path& path)
         config.framebuffer_direct_output = gui["framebuffer_direct_output"].as<bool>();
     }
     if (gui["font_path"]) config.font_path = gui["font_path"].as<std::string>();
+    if (gui["frequency_digit_font_path"]) {
+        config.frequency_digit_font_path = gui["frequency_digit_font_path"].as<std::string>();
+    }
     if (gui["s9_reference_dbfs"] && gui["s9_reference_dbfs"].IsSequence()) {
         for (std::size_t index = 0; index < 2U && index < gui["s9_reference_dbfs"].size(); ++index) {
             config.s9_reference_dbfs[index] = gui["s9_reference_dbfs"][index].as<double>();
@@ -767,6 +772,13 @@ std::string frequency_text(std::int64_t value)
     return out.str();
 }
 
+std::string frequency_numeric_text(std::int64_t value)
+{
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(4) << hz_to_mhz(value);
+    return out.str();
+}
+
 std::string gain_text(int value)
 {
     std::ostringstream out;
@@ -1021,7 +1033,13 @@ private:
         font_small_ = TTF_OpenFont(config_.font_path.c_str(), 13);
         font_bold_ = TTF_OpenFont(config_.font_path.c_str(), 19);
         font_frequency_ = TTF_OpenFont(config_.font_path.c_str(), 25);
-        if (!font_small_ || !font_bold_ || !font_frequency_) {
+        font_frequency_digits_ = TTF_OpenFont(config_.frequency_digit_font_path.c_str(), 25);
+        if (!font_frequency_digits_) {
+            std::cerr << "dmr_b210_gui: frequency digit font unavailable, using kiosk font: "
+                      << config_.frequency_digit_font_path << '\n';
+            font_frequency_digits_ = TTF_OpenFont(config_.font_path.c_str(), 25);
+        }
+        if (!font_small_ || !font_bold_ || !font_frequency_ || !font_frequency_digits_) {
             throw std::runtime_error("cannot open kiosk font sizes");
         }
     }
@@ -1044,6 +1062,7 @@ private:
 #endif
         if (font_bold_) TTF_CloseFont(font_bold_);
         if (font_frequency_) TTF_CloseFont(font_frequency_);
+        if (font_frequency_digits_) TTF_CloseFont(font_frequency_digits_);
         if (font_small_) TTF_CloseFont(font_small_);
         if (font_) TTF_CloseFont(font_);
         if (canvas_) SDL_DestroyTexture(canvas_);
@@ -1559,6 +1578,30 @@ private:
         draw_text_clipped(text, x, y, color, box, selected);
     }
 
+    void draw_home_frequency(const std::string& label, std::int64_t value,
+                             SDL_Rect box)
+    {
+        const std::string digits = frequency_numeric_text(value);
+        int digits_width = 0;
+        int digits_height = 0;
+        TTF_SizeUTF8(font_frequency_digits_, digits.c_str(), &digits_width, &digits_height);
+        const int label_width = 34;
+        const int digits_x = box.x + label_width;
+        const int unit_x = digits_x + digits_width + 6;
+        const int label_height = TTF_FontHeight(font_frequency_);
+        const int label_y = box.y + std::max(0, (box.h - label_height) / 2);
+        const int digits_y = box.y + std::max(0, (box.h - digits_height) / 2);
+        const int unit_y = box.y + std::max(0, (box.h - label_height) / 2) + 7;
+        draw_text_clipped(label, box.x, label_y, kCyan,
+                          {box.x, box.y, label_width, box.h}, font_frequency_);
+        draw_text_clipped(digits, digits_x, digits_y, kCyan,
+                          {digits_x, box.y, box.w - label_width, box.h},
+                          font_frequency_digits_);
+        draw_text_clipped("MHz", unit_x, unit_y, kCyan,
+                          {unit_x, box.y, std::max(0, box.x + box.w - unit_x), box.h},
+                          font_frequency_);
+    }
+
     void draw_box(SDL_Rect box, SDL_Color fill = kPanel)
     {
         SDL_SetRenderDrawColor(renderer_, fill.r, fill.g, fill.b, fill.a);
@@ -1616,10 +1659,10 @@ private:
             ? "读取中"
             : channel_label(state_.active_profile);
         draw_text_clipped(channel_title, 28, 78, kText, {28, 74, 420, 30}, font_bold_);
-        draw_text_clipped("RX " + frequency_text(state_.active_channel.rx_frequency_hz),
-                          28, 103, kCyan, {28, 99, 205, 34}, font_frequency_);
-        draw_text_clipped("TX " + frequency_text(state_.active_channel.tx_frequency_hz),
-                          250, 103, kCyan, {250, 99, 208, 34}, font_frequency_);
+        draw_home_frequency("RX", state_.active_channel.rx_frequency_hz,
+                            {28, 99, 205, 34});
+        draw_home_frequency("TX", state_.active_channel.tx_frequency_hz,
+                            {250, 99, 208, 34});
         draw_box({28, 134, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
@@ -1638,13 +1681,16 @@ private:
         draw_box(forwarding_state_box, state_.rf_fault ? kRed :
                  (state_.forwarding_enabled ? kGreen : kDark));
         const std::string forwarding_state_label = state_.rf_fault ? "射频故障" :
-            (state_.forwarding_enabled ? "● 转发运行中" : "○ 转发待机");
+            (state_.forwarding_enabled ? "转发运行中" : "转发待机");
         const std::string forwarding_control_label = state_.rf_fault ? "复位射频" :
             (state_.forwarding_enabled ? "停止转发" : "启动转发");
+        const SDL_Color indicator_color = state_.forwarding_enabled ? kRed : kBackground;
+        draw_text_vcentered_clipped("●", 44, indicator_color,
+                                    {44, forwarding_state_box.y, 18, forwarding_state_box.h}, font_);
         draw_text_vcentered_clipped(
-            forwarding_state_label, 44,
+            forwarding_state_label, 66,
             state_.forwarding_enabled && !state_.rf_fault ? kBackground : kText,
-            {40, forwarding_state_box.y, 205, forwarding_state_box.h}, font_);
+            {66, forwarding_state_box.y, 179, forwarding_state_box.h}, font_);
         add_button({267, 198, 126, 35}, forwarding_control_label,
                    state_.rf_fault ? kRed : (state_.forwarding_enabled ? kDark : kGreen), [this] {
             const bool reset_fault = state_.rf_fault;
@@ -2924,6 +2970,7 @@ private:
     TTF_Font* font_small_ = nullptr;
     TTF_Font* font_bold_ = nullptr;
     TTF_Font* font_frequency_ = nullptr;
+    TTF_Font* font_frequency_digits_ = nullptr;
     RuntimeState state_;
     CalibrationUiState calibration_;
     std::map<std::string, std::string> pending_;
