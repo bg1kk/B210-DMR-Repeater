@@ -33,6 +33,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -93,6 +94,33 @@ std::string trim(std::string value)
     }
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1U);
+}
+
+int channel_sort_number(const std::string& profile_id)
+{
+    const std::string prefix = "channel-";
+    if (profile_id.rfind(prefix, 0) != 0) {
+        return std::numeric_limits<int>::max();
+    }
+    try {
+        const std::size_t offset = prefix.size();
+        if (offset == profile_id.size()) return std::numeric_limits<int>::max();
+        const int number = std::stoi(profile_id.substr(offset));
+        return number >= 0 ? number : std::numeric_limits<int>::max();
+    } catch (...) {
+        return std::numeric_limits<int>::max();
+    }
+}
+
+void sort_channel_profiles(std::vector<std::string>& profile_ids)
+{
+    std::sort(profile_ids.begin(), profile_ids.end(), [](const std::string& left,
+                                                         const std::string& right) {
+        const int left_number = channel_sort_number(left);
+        const int right_number = channel_sort_number(right);
+        if (left_number != right_number) return left_number < right_number;
+        return left < right;
+    });
 }
 
 #if defined(__linux__)
@@ -208,6 +236,7 @@ GuiConfig load_config(const std::filesystem::path& path)
                     })) {
         throw std::runtime_error("invalid GUI quick profile configuration");
     }
+    sort_channel_profiles(config.quick_profile_ids);
     return config;
 }
 
@@ -221,8 +250,10 @@ void persist_gui_quick_profiles(const std::filesystem::path& path,
             throw std::runtime_error("GUI config root is not a map");
         }
         YAML::Node gui = root["gui"] ? root["gui"] : root;
+        std::vector<std::string> sorted_profile_ids = profile_ids;
+        sort_channel_profiles(sorted_profile_ids);
         YAML::Node quick_profiles(YAML::NodeType::Sequence);
-        for (const std::string& profile_id : profile_ids) {
+        for (const std::string& profile_id : sorted_profile_ids) {
             quick_profiles.push_back(profile_id);
         }
         gui["quick_profile_ids"] = quick_profiles;
@@ -756,6 +787,7 @@ public:
                 quick_profile_ids_.push_back(profile_id);
             }
         }
+        sort_channel_profiles(quick_profile_ids_);
     }
 
     int run()
@@ -816,8 +848,9 @@ public:
             const YAML::Node quick = persisted["gui"]["quick_profile_ids"];
             quick_profile_persistence =
                 quick.IsSequence() && quick.size() == 3U &&
-                quick[0].as<std::string>() == "channel-03" &&
-                quick[2].as<std::string>() == "channel-02";
+                quick[0].as<std::string>() == "channel-01" &&
+                quick[1].as<std::string>() == "channel-02" &&
+                quick[2].as<std::string>() == "channel-03";
         } catch (...) {
             quick_profile_persistence = false;
         }
@@ -1133,8 +1166,7 @@ private:
             state_.active_profile = *profile;
             const auto cached_channel = channels_.find(*profile);
             Channel active_channel = cached_channel == channels_.end()
-                ? state_.active_channel
-                : cached_channel->second;
+                ? state_.active_channel : cached_channel->second;
             active_channel.id = *profile;
             const auto active_rx = json_number<std::int64_t>(
                 object, "active_rx_frequency_hz");
@@ -1146,19 +1178,10 @@ private:
             if (active_tx && *active_tx > 0) {
                 active_channel.tx_frequency_hz = *active_tx;
             }
-            if ((active_rx && *active_rx > 0) || (active_tx && *active_tx > 0)) {
-                state_.active_channel = active_channel;
-                if (active_channel.rx_frequency_hz > 0 &&
-                    active_channel.tx_frequency_hz > 0) {
-                    channels_[*profile] = active_channel;
-                }
-            }
-            if (cached_channel != channels_.end()) {
-                state_.active_channel = cached_channel->second;
-                state_.active_channel.id = *profile;
-            }
-            if ((active_rx && *active_rx > 0) || (active_tx && *active_tx > 0)) {
-                state_.active_channel = active_channel;
+            state_.active_channel = active_channel;
+            if (active_channel.rx_frequency_hz > 0 &&
+                active_channel.tx_frequency_hz > 0) {
+                channels_[*profile] = active_channel;
             }
             if (changed) {
                 if (state_.online) {
@@ -1343,6 +1366,12 @@ private:
         const auto pending = pending_.find(request_id);
         const std::string action = pending == pending_.end() ? "UDP 命令" : pending->second;
         if (pending != pending_.end()) pending_.erase(pending);
+        const auto switch_request = switch_requests_.find(request_id);
+        const std::string switched_profile = switch_request == switch_requests_.end()
+            ? "" : switch_request->second;
+        if (switch_request != switch_requests_.end()) {
+            switch_requests_.erase(switch_request);
+        }
         pending_sent_at_.erase(request_id);
         const bool ok = json_bool(frame, "ok").value_or(false);
         const std::string code = json_string(frame, "code").value_or("错误");
@@ -1403,6 +1432,26 @@ private:
             if (action == "CAL save" && ok &&
                 json_bool(state, "config_written").value_or(false)) {
                 add_event("校准已保存", kGreen);
+            }
+        }
+        if (ok && !switched_profile.empty()) {
+            // The switch command is queued for the RF owner. Apply the
+            // cached channel immediately, then refresh from authoritative RF
+            // status so every page follows the same active profile.
+            state_.active_profile = switched_profile;
+            const auto cached = channels_.find(switched_profile);
+            if (cached != channels_.end()) {
+                state_.active_channel = cached->second;
+                state_.active_channel.id = switched_profile;
+            } else {
+                state_.active_channel.id = switched_profile;
+            }
+            request_channel_refresh(switched_profile);
+            try {
+                const std::string status_request = client_.send("get_status");
+                track(status_request, "读取活动信道");
+            } catch (const std::exception& error) {
+                add_event(std::string("读取活动信道失败：") + error.what(), kRed);
             }
         }
         if (calibration_exit_after_save_ && calibration_.state == "committed" &&
@@ -1789,9 +1838,18 @@ private:
         const std::string action = description.empty()
             ? (persist_active_profile ? "激活并保存" : "切换信道")
             : description;
-        send_control("switch_channel", "\"profile_id\":\"" + json_escape(id) + "\",\"persist_active_profile\":" +
-                     (persist_active_profile ? "true" : "false"),
-                     action);
+        if (!controls_enabled()) return;
+        try {
+            const std::string request_id = client_.send(
+                "switch_channel", "\"profile_id\":\"" + json_escape(id) +
+                "\",\"persist_active_profile\":" +
+                (persist_active_profile ? "true" : "false"));
+            track(request_id, action);
+            switch_requests_[request_id] = id;
+            add_event(action + "：等待确认", kAmber);
+        } catch (const std::exception& error) {
+            add_event(std::string("UDP 发送失败：") + error.what(), kRed);
+        }
     }
 
     std::string channel_label(const std::string& profile_id) const
@@ -1820,6 +1878,7 @@ private:
         } else {
             quick_profile_ids_.push_back(profile_id);
         }
+        sort_channel_profiles(quick_profile_ids_);
         try {
             persist_gui_quick_profiles(config_.config_path, quick_profile_ids_);
             add_event(channel_label(profile_id) +
@@ -2835,6 +2894,7 @@ private:
     std::map<std::string, std::chrono::steady_clock::time_point> pending_sent_at_;
     std::map<std::string, Channel> channels_;
     std::map<std::string, std::string> channel_requests_;
+    std::map<std::string, std::string> switch_requests_;
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
     std::vector<EventLine> events_;
     std::vector<Hit> hits_;
