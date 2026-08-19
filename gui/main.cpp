@@ -37,6 +37,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -65,6 +66,7 @@ constexpr SDL_Color kDark{42, 53, 59, 255};
 #include "dmr_rpt/build_info.h"
 
 struct GuiConfig {
+    std::filesystem::path config_path;
     std::string device_name = "DMR B210 转发器";
     std::string udp_address = "127.0.0.1";
     int udp_port = 42000;
@@ -80,6 +82,7 @@ struct GuiConfig {
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
     std::array<double, 2> s9_reference_dbfs{-87.0, -87.0};
     std::vector<std::string> profile_ids;
+    std::vector<std::string> quick_profile_ids;
 };
 
 std::string trim(std::string value)
@@ -134,6 +137,7 @@ GuiConfig load_config(const std::filesystem::path& path)
     const YAML::Node root = YAML::LoadFile(path.string());
     const YAML::Node gui = root["gui"] ? root["gui"] : root;
     GuiConfig config;
+    config.config_path = path;
     if (gui["device_name"]) config.device_name = gui["device_name"].as<std::string>();
     if (gui["udp_address"]) config.udp_address = gui["udp_address"].as<std::string>();
     if (gui["udp_port"]) config.udp_port = gui["udp_port"].as<int>();
@@ -168,6 +172,11 @@ GuiConfig load_config(const std::filesystem::path& path)
             config.profile_ids.push_back(id.as<std::string>());
         }
     }
+    if (gui["quick_profile_ids"] && gui["quick_profile_ids"].IsSequence()) {
+        for (const YAML::Node& id : gui["quick_profile_ids"]) {
+            config.quick_profile_ids.push_back(id.as<std::string>());
+        }
+    }
     if (!config.control_token_file.empty()) {
         std::ifstream stream(config.control_token_file);
         if (!stream) {
@@ -188,7 +197,89 @@ GuiConfig load_config(const std::filesystem::path& path)
     if (config.framebuffer_direct_output && config.rotation_degrees != 0) {
         throw std::runtime_error("direct framebuffer output requires zero display rotation");
     }
+    const std::set<std::string> unique_quick_profiles(
+        config.quick_profile_ids.begin(), config.quick_profile_ids.end());
+    if (config.quick_profile_ids.size() > 3U ||
+        unique_quick_profiles.size() != config.quick_profile_ids.size() ||
+        std::any_of(config.quick_profile_ids.begin(), config.quick_profile_ids.end(),
+                    [&](const std::string& profile_id) {
+                        return std::find(config.profile_ids.begin(), config.profile_ids.end(),
+                                         profile_id) == config.profile_ids.end();
+                    })) {
+        throw std::runtime_error("invalid GUI quick profile configuration");
+    }
     return config;
+}
+
+void persist_gui_quick_profiles(const std::filesystem::path& path,
+                                const std::vector<std::string>& profile_ids)
+{
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(path.string());
+        if (!root || !root.IsMap()) {
+            throw std::runtime_error("GUI config root is not a map");
+        }
+        YAML::Node gui = root["gui"] ? root["gui"] : root;
+        YAML::Node quick_profiles(YAML::NodeType::Sequence);
+        for (const std::string& profile_id : profile_ids) {
+            quick_profiles.push_back(profile_id);
+        }
+        gui["quick_profile_ids"] = quick_profiles;
+    } catch (const YAML::Exception& error) {
+        throw std::runtime_error("cannot update GUI config: " +
+                                 std::string(error.what()));
+    }
+
+    YAML::Emitter emitter;
+    emitter.SetIndent(2);
+    emitter << root;
+    if (!emitter.good()) {
+        throw std::runtime_error("cannot serialize GUI config");
+    }
+
+    const std::filesystem::path temporary_path =
+        std::filesystem::path(path.string() + ".quick-profiles.tmp");
+    const auto remove_temporary = [&temporary_path]() {
+        std::error_code ignored;
+        std::filesystem::remove(temporary_path, ignored);
+    };
+    std::error_code status_error;
+    const std::filesystem::file_status original_status =
+        std::filesystem::status(path, status_error);
+    if (status_error) {
+        throw std::runtime_error("cannot inspect GUI config permissions: " +
+                                 status_error.message());
+    }
+    {
+        std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            throw std::runtime_error("cannot create temporary GUI config");
+        }
+        output << emitter.c_str() << '\n';
+        output.flush();
+        if (!output) {
+            output.close();
+            remove_temporary();
+            throw std::runtime_error("cannot write temporary GUI config");
+        }
+    }
+    std::error_code permissions_error;
+    std::filesystem::permissions(temporary_path, original_status.permissions(),
+                                 std::filesystem::perm_options::replace,
+                                 permissions_error);
+    if (permissions_error) {
+        remove_temporary();
+        throw std::runtime_error("cannot preserve GUI config permissions: " +
+                                 permissions_error.message());
+    }
+    std::error_code rename_error;
+    std::filesystem::rename(temporary_path, path, rename_error);
+    if (rename_error) {
+        remove_temporary();
+        throw std::runtime_error("cannot replace GUI config: " +
+                                 rename_error.message());
+    }
 }
 
 std::string json_escape(const std::string& text)
@@ -657,9 +748,13 @@ public:
     GuiApp(GuiConfig config, bool stop_only)
         : config_(std::move(config)), client_(config_), stop_only_(stop_only)
     {
-        for (const std::string& profile_id : config_.profile_ids) {
-            if (quick_profile_ids_.size() >= 3U) break;
-            quick_profile_ids_.push_back(profile_id);
+        if (!config_.quick_profile_ids.empty()) {
+            quick_profile_ids_ = config_.quick_profile_ids;
+        } else {
+            for (const std::string& profile_id : config_.profile_ids) {
+                if (quick_profile_ids_.size() >= 3U) break;
+                quick_profile_ids_.push_back(profile_id);
+            }
         }
     }
 
@@ -706,6 +801,28 @@ public:
             is_background_request("CAL query") &&
             is_background_request("启动状态订阅") &&
             !is_background_request("切换信道");
+        bool quick_profile_persistence = false;
+        const std::filesystem::path quick_test_path =
+            std::filesystem::temp_directory_path() /
+            "dmr-b210-gui-quick-profile-self-test.yaml";
+        try {
+            {
+                std::ofstream output(quick_test_path);
+                output << "gui:\n  profile_ids: [channel-01, channel-02, channel-03]\n";
+            }
+            persist_gui_quick_profiles(
+                quick_test_path, {"channel-03", "channel-01", "channel-02"});
+            const YAML::Node persisted = YAML::LoadFile(quick_test_path.string());
+            const YAML::Node quick = persisted["gui"]["quick_profile_ids"];
+            quick_profile_persistence =
+                quick.IsSequence() && quick.size() == 3U &&
+                quick[0].as<std::string>() == "channel-03" &&
+                quick[2].as<std::string>() == "channel-02";
+        } catch (...) {
+            quick_profile_persistence = false;
+        }
+        std::error_code quick_test_cleanup_error;
+        std::filesystem::remove(quick_test_path, quick_test_cleanup_error);
         return level.label == "S9" && level.lit_segments == 9 &&
             s_meter(-67.0, -87.0).label == "S9 +20 dB" &&
             s_meter(-140.0, -87.0).lit_segments == 0 &&
@@ -718,7 +835,8 @@ public:
             !calibration_step_available(calibration) &&
             default_high_gain && stored_high_gain && independent_high_gain &&
             selected_calibration_gain(high_gain) == 0 &&
-            background_requests_do_not_block;
+            background_requests_do_not_block &&
+            quick_profile_persistence;
     }
 
     void configure_qa_view(const std::string& view)
@@ -869,7 +987,10 @@ private:
         if (!font_) throw std::runtime_error("cannot open configured Chinese font");
         font_small_ = TTF_OpenFont(config_.font_path.c_str(), 13);
         font_bold_ = TTF_OpenFont(config_.font_path.c_str(), 19);
-        if (!font_small_ || !font_bold_) throw std::runtime_error("cannot open kiosk font sizes");
+        font_frequency_ = TTF_OpenFont(config_.font_path.c_str(), 25);
+        if (!font_small_ || !font_bold_ || !font_frequency_) {
+            throw std::runtime_error("cannot open kiosk font sizes");
+        }
     }
 
     void shutdown_sdl()
@@ -889,6 +1010,7 @@ private:
         }
 #endif
         if (font_bold_) TTF_CloseFont(font_bold_);
+        if (font_frequency_) TTF_CloseFont(font_frequency_);
         if (font_small_) TTF_CloseFont(font_small_);
         if (font_) TTF_CloseFont(font_);
         if (canvas_) SDL_DestroyTexture(canvas_);
@@ -1422,9 +1544,9 @@ private:
             : channel_label(state_.active_profile);
         draw_text_clipped(channel_title, 28, 78, kText, {28, 74, 420, 30}, font_bold_);
         draw_text_clipped("RX " + frequency_text(state_.active_channel.rx_frequency_hz),
-                          28, 106, kCyan, {28, 102, 205, 30}, font_bold_);
+                          28, 103, kCyan, {28, 99, 205, 34}, font_frequency_);
         draw_text_clipped("TX " + frequency_text(state_.active_channel.tx_frequency_hz),
-                          250, 106, kCyan, {250, 102, 208, 30}, font_bold_);
+                          250, 103, kCyan, {250, 99, 208, 34}, font_frequency_);
         draw_box({28, 134, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
@@ -1660,12 +1782,16 @@ private:
         }
     }
 
-    void request_switch(const std::string& id, bool persist_active_profile = false)
+    void request_switch(const std::string& id, bool persist_active_profile = true,
+                        const std::string& description = {})
     {
         selected_profile_ = id;
+        const std::string action = description.empty()
+            ? (persist_active_profile ? "激活并保存" : "切换信道")
+            : description;
         send_control("switch_channel", "\"profile_id\":\"" + json_escape(id) + "\",\"persist_active_profile\":" +
                      (persist_active_profile ? "true" : "false"),
-                     persist_active_profile ? "设置开机信道" : "切换信道");
+                     action);
     }
 
     std::string channel_label(const std::string& profile_id) const
@@ -1683,18 +1809,27 @@ private:
 
     void toggle_quick_profile(const std::string& profile_id)
     {
+        const std::vector<std::string> previous = quick_profile_ids_;
         const auto found = std::find(quick_profile_ids_.begin(), quick_profile_ids_.end(), profile_id);
-        if (found != quick_profile_ids_.end()) {
+        const bool was_quick = found != quick_profile_ids_.end();
+        if (was_quick) {
             quick_profile_ids_.erase(found);
-            add_event(channel_label(profile_id) + " 已移出快速信道", kAmber);
-            return;
-        }
-        if (quick_profile_ids_.size() >= 3U) {
+        } else if (quick_profile_ids_.size() >= 3U) {
             add_event("快速信道最多选择 3 个", kRed);
             return;
+        } else {
+            quick_profile_ids_.push_back(profile_id);
         }
-        quick_profile_ids_.push_back(profile_id);
-        add_event(channel_label(profile_id) + " 已加入快速信道", kGreen);
+        try {
+            persist_gui_quick_profiles(config_.config_path, quick_profile_ids_);
+            add_event(channel_label(profile_id) +
+                          (was_quick
+                               ? " 已移出快速信道" : " 已加入快速信道"),
+                      kGreen);
+        } catch (const std::exception& error) {
+            quick_profile_ids_ = previous;
+            add_event("快捷信道保存失败：" + std::string(error.what()), kRed);
+        }
     }
 
     Channel selected_channel() const
@@ -1854,9 +1989,11 @@ private:
         add_button({292, 306, 110, 34}, draft_dirty_ ? "保存*" : "保存", kGreen,
                    [this, profile_id] { save_channel_draft(profile_id); }, controls_enabled());
         add_button({416, 306, 138, 34}, "激活此信道", kDark,
-                   [this, profile_id] { request_switch(profile_id); }, controls_enabled());
-        add_button({568, 306, 188, 34}, "设为开机信道", kDark,
                    [this, profile_id] { request_switch(profile_id, true); }, controls_enabled());
+        add_button({568, 306, 188, 34}, "设为开机信道", kDark,
+                   [this, profile_id] {
+                       request_switch(profile_id, true, "设置开机信道");
+                   }, controls_enabled());
         add_button({64, 366, 150, 34}, "自动", state_.gain_selection_mode == "auto" ? kCyan : kDark,
                    [this] { send_control("set_gain_mode", "\"gain_mode\":\"auto\"", "启用自动增益"); },
                    controls_enabled() && editing_active);
@@ -2691,6 +2828,7 @@ private:
     TTF_Font* font_ = nullptr;
     TTF_Font* font_small_ = nullptr;
     TTF_Font* font_bold_ = nullptr;
+    TTF_Font* font_frequency_ = nullptr;
     RuntimeState state_;
     CalibrationUiState calibration_;
     std::map<std::string, std::string> pending_;
