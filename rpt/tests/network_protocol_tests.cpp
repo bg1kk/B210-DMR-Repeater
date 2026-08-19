@@ -194,7 +194,11 @@ void test_udp_status_query()
         };
         callbacks.status_json = [] {
             return std::string(
-                "{\"v\":1,\"type\":\"status\",\"rf_running\":false,"
+                "{\"v\":1,\"type\":\"status\","
+                "\"active_channel_profile_id\":\"channel-02\","
+                "\"active_rx_frequency_hz\":438512500,"
+                "\"active_tx_frequency_hz\":145400000,"
+                "\"rf_running\":false,"
                 "\"rf_fault\":true,\"last_error\":\"B210 unavailable\"}");
         };
         dmr_rpt::NetworkControlService service(
@@ -265,6 +269,12 @@ void test_udp_status_query()
                             frame.find("\"receiver_mode\":\"dmr\"") !=
                                 std::string::npos &&
                             frame.find("\"gain_control\":{\"mode\":\"high\"") !=
+                                std::string::npos &&
+                            frame.find("\"active_channel_profile_id\":\"channel-02\"") !=
+                                std::string::npos &&
+                            frame.find("\"active_rx_frequency_hz\":438512500") !=
+                                std::string::npos &&
+                            frame.find("\"active_tx_frequency_hz\":145400000") !=
                                 std::string::npos &&
                             frame.find("\"rf_fault\":true") != std::string::npos &&
                             frame.find("B210 unavailable") != std::string::npos &&

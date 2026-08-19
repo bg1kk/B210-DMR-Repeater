@@ -370,10 +370,24 @@ std::string runtime_status_json(const NetworkRuntimeState& state)
 {
     std::lock_guard<std::mutex> lock(state.mutex);
     const auto& validated = state.validated;
+    const auto active_profile = std::find_if(
+        validated.config.channel_profiles.begin(),
+        validated.config.channel_profiles.end(),
+        [&](const dmr_rpt::ChannelProfile& profile) {
+            return profile.id == validated.rf.active_channel_profile_id;
+        });
     std::ostringstream out;
     out << "{\"v\":1,\"type\":\"status\",\"active_channel_profile_id\":\""
         << json_escape(validated.rf.active_channel_profile_id)
-        << "\",\"configured_channel_profile_count\":"
+        << "\",\"active_rx_frequency_hz\":"
+        << (active_profile == validated.config.channel_profiles.end()
+                ? 0
+                : active_profile->dmr_rx.frequency_hz)
+        << ",\"active_tx_frequency_hz\":"
+        << (active_profile == validated.config.channel_profiles.end()
+                ? 0
+                : active_profile->dmr_tx.frequency_hz)
+        << ",\"configured_channel_profile_count\":"
         << validated.rf.configured_channel_profile_count
         << ",\"forwarding_enabled\":"
         << (state.forwarding_enabled ? "true" : "false")

@@ -724,7 +724,7 @@ RepeaterConfig parse_root(const YAML::Node& root)
         {"RPT", "0.7.0"},
         {"AUDIO", "0.3.4"},
         {"DATA", "0.3.8"},
-        {"NET", "1.1.2"},
+        {"NET", "1.1.3"},
         {"SAFE", "0.4.5"},
         {"UDP", "0.12.3"},
         {"CAL", "2.0.1"},

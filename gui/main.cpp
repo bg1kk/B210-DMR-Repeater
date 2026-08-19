@@ -1010,9 +1010,33 @@ private:
             const bool changed = *profile != state_.active_profile;
             state_.active_profile = *profile;
             const auto cached_channel = channels_.find(*profile);
+            Channel active_channel = cached_channel == channels_.end()
+                ? state_.active_channel
+                : cached_channel->second;
+            active_channel.id = *profile;
+            const auto active_rx = json_number<std::int64_t>(
+                object, "active_rx_frequency_hz");
+            const auto active_tx = json_number<std::int64_t>(
+                object, "active_tx_frequency_hz");
+            if (active_rx && *active_rx > 0) {
+                active_channel.rx_frequency_hz = *active_rx;
+            }
+            if (active_tx && *active_tx > 0) {
+                active_channel.tx_frequency_hz = *active_tx;
+            }
+            if ((active_rx && *active_rx > 0) || (active_tx && *active_tx > 0)) {
+                state_.active_channel = active_channel;
+                if (active_channel.rx_frequency_hz > 0 &&
+                    active_channel.tx_frequency_hz > 0) {
+                    channels_[*profile] = active_channel;
+                }
+            }
             if (cached_channel != channels_.end()) {
                 state_.active_channel = cached_channel->second;
                 state_.active_channel.id = *profile;
+            }
+            if ((active_rx && *active_rx > 0) || (active_tx && *active_tx > 0)) {
+                state_.active_channel = active_channel;
             }
             if (changed) {
                 if (state_.online) {
@@ -1397,9 +1421,10 @@ private:
             ? "读取中"
             : channel_label(state_.active_profile);
         draw_text_clipped(channel_title, 28, 78, kText, {28, 74, 420, 30}, font_bold_);
-        draw_text_clipped("RX " + frequency_text(state_.active_channel.rx_frequency_hz) +
-                          "   |   TX " + frequency_text(state_.active_channel.tx_frequency_hz),
-                          28, 110, kMuted, {28, 106, 430, 24}, font_small_);
+        draw_text_clipped("RX " + frequency_text(state_.active_channel.rx_frequency_hz),
+                          28, 106, kCyan, {28, 102, 205, 30}, font_bold_);
+        draw_text_clipped("TX " + frequency_text(state_.active_channel.tx_frequency_hz),
+                          250, 106, kCyan, {250, 102, 208, 30}, font_bold_);
         draw_box({28, 134, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];

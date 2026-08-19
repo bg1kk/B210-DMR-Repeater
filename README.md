@@ -11,7 +11,7 @@ This copyright statement must be retained.
 
 本项目实现运行于 Raspberry Pi 5 的 USRP B210 DMR 数字转发器及本地触摸屏控制终端。系统接收 VHF/UHF DMR 信号，透明转发原始 DMR 帧到配置的 DMR 发射频点；可选接收带 CTCSS 的模拟 FM 信号，并以固定源 ID `9999`、全呼目标 ID `16777215` 转发为 DMR。程序同时记录通话音频为 MP3，并通过 UDP 向 GUI 提供实时运行状态和控制能力。
 
-源码与Pi5部署版本：`V1.2.1 B159`。该版本将IO4/IO5明确改为读取外部前级档位的输入；绝对dBm仍须完成现场全点校准后才有效。
+源码与Pi5部署版本：`V1.2.1 B160`。该版本将活动信道RX/TX频率随状态流同步发送，GUI主页立即刷新当前信道，并以显著粗体分栏显示频率；IO4/IO5继续明确为读取外部前级档位的输入，绝对dBm仍须完成现场全点校准后才有效。
 
 ## 2. 源码目录
 
@@ -172,6 +172,12 @@ sudo systemctl status dmr-b210-gui-kiosk.service
 - UDP状态增加B210端口RSSI、前级stage/衰减/GPIO码/健康字段；天线参考面RSSI加上实测前级衰减。
 - 校准有效时GUI固定S1=-121 dBm、S9=-73 dBm；未校准继续显示dBFS。
 - Pi5完整构建、10/10 CTest和GUI自检通过后部署；外部前级未接入和实测前保持disabled。
+
+### V1.2.1 B160, 2026-08-19
+
+- 状态流运行时快照增加活动profile对应的RX/TX频率，GUI不再等待异步信道回读才刷新主页。
+- 主页频率改为RX/TX分栏、19px粗体显示；活动CH2抓屏确认显示438.5125/430.5125 MHz且快捷按钮反色。
+- Pi5 aarch64完成10/10 CTest、GUI自检、systemd部署和CH1/CH2/CH1状态流验收。
 
 ### V1.0.7 B154, 2026-08-15
 

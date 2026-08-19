@@ -212,7 +212,7 @@ void test_config(const std::filesystem::path& config_path)
     require(validated.config.contract_versions.at("RF") == "1.1.1" &&
                 validated.config.contract_versions.at("AIR") == "0.6.2" &&
                 validated.config.contract_versions.at("RPT") == "0.7.0" &&
-                validated.config.contract_versions.at("NET") == "1.1.2" &&
+                validated.config.contract_versions.at("NET") == "1.1.3" &&
                 validated.config.contract_versions.at("UDP") == "0.12.3" &&
                 validated.config.contract_versions.at("CAL") == "2.0.1" &&
                 validated.config.contract_versions.at("SAFE") == "0.4.5" &&
