@@ -1009,9 +1009,12 @@ private:
         if (const auto profile = json_string(object, "active_channel_profile_id")) {
             const bool changed = *profile != state_.active_profile;
             state_.active_profile = *profile;
-            if (changed &&
-                (state_.active_channel.id != *profile ||
-                 channels_.find(*profile) == channels_.end())) {
+            const auto cached_channel = channels_.find(*profile);
+            if (cached_channel != channels_.end()) {
+                state_.active_channel = cached_channel->second;
+                state_.active_channel.id = *profile;
+            }
+            if (changed) {
                 if (state_.online) {
                     request_channel_refresh(*profile);
                 } else {
@@ -1071,7 +1074,10 @@ private:
         }
         if (channel.rx_frequency_hz > 0 && channel.tx_frequency_hz > 0) {
             channels_[channel.id] = channel;
-            if (make_active) state_.active_channel = channel;
+            if (make_active) {
+                state_.active_channel = channel;
+                state_.active_profile = channel.id;
+            }
             if (channel.id == draft_profile_id_ && !draft_dirty_) {
                 draft_channel_ = channel;
             }
@@ -1085,6 +1091,7 @@ private:
         state_.last_sequence = *sequence;
         state_.last_update = std::chrono::steady_clock::now();
         state_.stale = false;
+        state_.online = true;
         if (const auto mode = json_string(frame, "working_mode")) state_.working_mode = *mode;
         const std::string runtime = json_object(frame, "runtime");
         if (!runtime.empty()) update_runtime(runtime);
@@ -1343,7 +1350,8 @@ private:
 
     void add_button(SDL_Rect box, const std::string& label, SDL_Color color,
                     std::function<void()> callback, bool enabled = true,
-                    bool available_when_locked = false)
+                    bool available_when_locked = false,
+                    SDL_Color label_color = kText)
     {
         draw_box(box, enabled ? color : kDark);
         int width = 0;
@@ -1351,7 +1359,7 @@ private:
         TTF_SizeUTF8(font_small_, label.c_str(), &width, &height);
         const int x = box.x + std::max(4, (box.w - width) / 2);
         const int y = box.y + std::max(2, (box.h - height) / 2);
-        draw_text_clipped(label, x, y, enabled ? kText : kMuted,
+        draw_text_clipped(label, x, y, enabled ? label_color : kMuted,
                           {box.x + 4, box.y + 2, std::max(1, box.w - 8),
                            std::max(1, box.h - 4)}, font_small_);
         if (enabled && (!ui_locked_ || available_when_locked)) {
@@ -1385,8 +1393,9 @@ private:
     {
         draw_box({12, 44, 466, 200});
         draw_text("当前工作信道", 28, 58, kMuted, font_small_);
-        const std::string channel_title = state_.active_profile.empty() ? "读取中" :
-            state_.active_profile + "  " + frequency_text(state_.active_channel.tx_frequency_hz);
+        const std::string channel_title = state_.active_profile.empty()
+            ? "读取中"
+            : channel_label(state_.active_profile);
         draw_text_clipped(channel_title, 28, 78, kText, {28, 74, 420, 30}, font_bold_);
         draw_text_clipped("RX " + frequency_text(state_.active_channel.rx_frequency_hz) +
                           "   |   TX " + frequency_text(state_.active_channel.tx_frequency_hz),
@@ -1395,9 +1404,11 @@ private:
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
             const int x = 28 + static_cast<int>(index) * 134;
+            const bool active = profile_id == state_.active_profile;
             add_button({x, 144, 133, 28}, channel_label(profile_id),
-                profile_id == state_.active_profile ? kCyan : kDark,
-                [this, profile_id] { request_switch(profile_id); }, controls_enabled());
+                active ? kCyan : kDark,
+                [this, profile_id] { request_switch(profile_id); }, controls_enabled(),
+                false, active ? kBackground : kText);
         }
         draw_text_vcentered_clipped("转发控制", 28, kMuted, {28, 175, 229, 19},
                                     font_small_);
