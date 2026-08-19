@@ -1161,34 +1161,55 @@ private:
 
     void update_runtime(const std::string& object)
     {
+        const auto runtime_error = json_string(object, "last_error").value_or("");
         if (const auto profile = json_string(object, "active_channel_profile_id")) {
-            const bool changed = *profile != state_.active_profile;
-            state_.active_profile = *profile;
-            const auto cached_channel = channels_.find(*profile);
-            Channel active_channel = cached_channel == channels_.end()
-                ? state_.active_channel : cached_channel->second;
-            active_channel.id = *profile;
-            const auto active_rx = json_number<std::int64_t>(
-                object, "active_rx_frequency_hz");
-            const auto active_tx = json_number<std::int64_t>(
-                object, "active_tx_frequency_hz");
-            if (active_rx && *active_rx > 0) {
-                active_channel.rx_frequency_hz = *active_rx;
-            }
-            if (active_tx && *active_tx > 0) {
-                active_channel.tx_frequency_hz = *active_tx;
-            }
-            state_.active_channel = active_channel;
-            if (active_channel.rx_frequency_hz > 0 &&
-                active_channel.tx_frequency_hz > 0) {
-                channels_[*profile] = active_channel;
-            }
-            if (changed) {
-                if (state_.online) {
-                    request_channel_refresh(*profile);
+            bool accept_profile = true;
+            if (pending_switch_profile_) {
+                if (*profile == *pending_switch_profile_) {
+                    pending_switch_profile_.reset();
+                } else if (!runtime_error.empty() ||
+                           std::chrono::steady_clock::now() - pending_switch_started_ >
+                               std::chrono::seconds(8)) {
+                    pending_switch_profile_.reset();
+                    if (runtime_error.empty()) {
+                        add_event("信道切换超时", kRed);
+                    }
                 } else {
-                    channel_refresh_due_[*profile] =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+                    // RF reinitialization is asynchronous. Do not let an old
+                    // status packet roll the GUI back while the target RF
+                    // profile is still being activated.
+                    accept_profile = false;
+                }
+            }
+            if (accept_profile) {
+                const bool changed = *profile != state_.active_profile;
+                state_.active_profile = *profile;
+                const auto cached_channel = channels_.find(*profile);
+                Channel active_channel = cached_channel == channels_.end()
+                    ? state_.active_channel : cached_channel->second;
+                active_channel.id = *profile;
+                const auto active_rx = json_number<std::int64_t>(
+                    object, "active_rx_frequency_hz");
+                const auto active_tx = json_number<std::int64_t>(
+                    object, "active_tx_frequency_hz");
+                if (active_rx && *active_rx > 0) {
+                    active_channel.rx_frequency_hz = *active_rx;
+                }
+                if (active_tx && *active_tx > 0) {
+                    active_channel.tx_frequency_hz = *active_tx;
+                }
+                state_.active_channel = active_channel;
+                if (active_channel.rx_frequency_hz > 0 &&
+                    active_channel.tx_frequency_hz > 0) {
+                    channels_[*profile] = active_channel;
+                }
+                if (changed) {
+                    if (state_.online) {
+                        request_channel_refresh(*profile);
+                    } else {
+                        channel_refresh_due_[*profile] =
+                            std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+                    }
                 }
             }
         }
@@ -1202,7 +1223,7 @@ private:
         if (const auto forwarding = json_bool(object, "forwarding_enabled")) state_.forwarding_enabled = *forwarding;
         if (const auto running = json_bool(object, "rf_running")) state_.rf_running = *running;
         if (const auto fault = json_bool(object, "rf_fault")) state_.rf_fault = *fault;
-        if (const auto error = json_string(object, "last_error")) state_.last_error = *error;
+        state_.last_error = runtime_error;
         if (const auto version = json_string(object, "repeater_version")) {
             state_.repeater_version = *version;
         }
@@ -1453,6 +1474,8 @@ private:
             } catch (const std::exception& error) {
                 add_event(std::string("读取活动信道失败：") + error.what(), kRed);
             }
+        } else if (!ok && !switched_profile.empty()) {
+            pending_switch_profile_.reset();
         }
         if (calibration_exit_after_save_ && calibration_.state == "committed" &&
             calibration_.session_id.empty()) {
@@ -1478,6 +1501,7 @@ private:
     bool controls_enabled() const
     {
         if (!state_.online) return false;
+        if (pending_switch_profile_) return false;
         return std::none_of(pending_.begin(), pending_.end(), [](const auto& item) {
             return !is_background_request(item.second);
         });
@@ -1846,6 +1870,8 @@ private:
                 (persist_active_profile ? "true" : "false"));
             track(request_id, action);
             switch_requests_[request_id] = id;
+            pending_switch_profile_ = id;
+            pending_switch_started_ = std::chrono::steady_clock::now();
             add_event(action + "：等待确认", kAmber);
         } catch (const std::exception& error) {
             add_event(std::string("UDP 发送失败：") + error.what(), kRed);
@@ -2806,6 +2832,16 @@ private:
 
     void dispatch_pointer_up(int x, int y)
     {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_pointer_up_.time_since_epoch().count() != 0 &&
+            now - last_pointer_up_ < std::chrono::milliseconds(300) &&
+            std::abs(x - last_pointer_x_) <= 8 &&
+            std::abs(y - last_pointer_y_) <= 8) {
+            return;
+        }
+        last_pointer_up_ = now;
+        last_pointer_x_ = x;
+        last_pointer_y_ = y;
         if (calibration_leave_dialog_) {
             for (std::size_t index = calibration_dialog_hit_begin_;
                  index < hits_.size(); ++index) {
@@ -2895,6 +2931,8 @@ private:
     std::map<std::string, Channel> channels_;
     std::map<std::string, std::string> channel_requests_;
     std::map<std::string, std::string> switch_requests_;
+    std::optional<std::string> pending_switch_profile_;
+    std::chrono::steady_clock::time_point pending_switch_started_{};
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
     std::vector<EventLine> events_;
     std::vector<Hit> hits_;
@@ -2913,6 +2951,9 @@ private:
     bool calibration_exit_after_discard_ = false;
     int calibration_exit_target_page_ = 3;
     bool qa_view_enabled_ = false;
+    std::chrono::steady_clock::time_point last_pointer_up_{};
+    int last_pointer_x_ = 0;
+    int last_pointer_y_ = 0;
     std::chrono::steady_clock::time_point active_call_started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point gui_started_ = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point next_calibration_query_{};
