@@ -844,7 +844,10 @@ public:
             is_background_request("读取 CH1") &&
             is_background_request("CAL query") &&
             is_background_request("启动状态订阅") &&
-            !is_background_request("切换信道");
+            !is_background_request("切换信道") &&
+            is_switch_request("切换信道") &&
+            is_switch_request("激活并保存") &&
+            !is_switch_request("停止转发");
         bool quick_profile_persistence = false;
         const std::filesystem::path quick_test_path =
             std::filesystem::temp_directory_path() /
@@ -882,6 +885,142 @@ public:
             selected_calibration_gain(high_gain) == 0 &&
             background_requests_do_not_block &&
             quick_profile_persistence;
+    }
+
+    static bool interaction_self_test(GuiConfig config)
+    {
+        if (config.profile_ids.empty()) {
+            for (int index = 1; index <= 8; ++index) {
+                config.profile_ids.push_back("channel-0" + std::to_string(index));
+            }
+        }
+        if (config.quick_profile_ids.empty()) {
+            config.quick_profile_ids = {"channel-01", "channel-02", "channel-03"};
+        }
+        if (config.font_path.empty()) {
+            config.font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+        }
+        const std::filesystem::path test_path =
+            std::filesystem::temp_directory_path() /
+            "dmr-b210-gui-interaction-self-test.yaml";
+        bool initialized = false;
+        bool passed = false;
+        try {
+            {
+                std::ofstream output(test_path);
+                output << "gui:\n"
+                       << "  profile_ids: [channel-01, channel-02, channel-03, channel-04, "
+                          "channel-05, channel-06, channel-07, channel-08]\n"
+                       << "  quick_profile_ids: [channel-01, channel-02, channel-03]\n";
+            }
+            config.config_path = test_path;
+            config.listen_port = 0;
+            config.udp_port = 42999;
+            config.framebuffer_direct_output = false;
+            config.rotation_degrees = 0;
+            config.kmsdrm_device_index = -1;
+            GuiApp app(std::move(config), false);
+            app.initialize_sdl();
+            initialized = true;
+            app.state_.online = true;
+            app.state_.stale = false;
+            app.state_.forwarding_enabled = true;
+            for (std::size_t index = 0; index < app.config_.profile_ids.size(); ++index) {
+                Channel channel;
+                channel.id = app.config_.profile_ids[index];
+                channel.rx_frequency_hz = 145400000 + static_cast<std::int64_t>(index) * 12500;
+                channel.tx_frequency_hz = 438500000 + static_cast<std::int64_t>(index) * 12500;
+                app.channels_[channel.id] = channel;
+            }
+            app.state_.active_profile = "channel-01";
+            app.state_.active_channel = app.channels_["channel-01"];
+
+            const auto click = [&app](int x, int y) {
+                app.last_pointer_up_ = {};
+                app.dispatch_pointer_up(x, y);
+                app.draw();
+            };
+            app.draw();
+            click(228, 159);
+            const std::string first_request = app.latest_switch_request_id_;
+            const bool first_quick_switch = app.pending_switch_profile_ == "channel-02";
+            click(362, 159);
+            const std::string second_request = app.latest_switch_request_id_;
+            const bool repeated_quick_switch = app.pending_switch_profile_ == "channel-03" &&
+                !first_request.empty() && !second_request.empty() && first_request != second_request;
+
+            app.update_response("{\"type\":\"response\",\"request_id\":\"" +
+                first_request +
+                "\",\"ok\":true,\"code\":\"accepted\",\"state\":{"
+                "\"active_channel_profile_id\":\"channel-02\","
+                "\"active_rx_frequency_hz\":145412500,"
+                "\"active_tx_frequency_hz\":438512500}}");
+            const bool old_response_ignored = app.state_.active_profile == "channel-01" &&
+                app.pending_switch_profile_ == "channel-03";
+            app.update_response("{\"type\":\"response\",\"request_id\":\"" +
+                second_request +
+                "\",\"ok\":true,\"code\":\"accepted\",\"state\":{"
+                "\"active_channel_profile_id\":\"channel-03\","
+                "\"active_rx_frequency_hz\":145425000,"
+                "\"active_tx_frequency_hz\":438525000}}");
+            const bool latest_response_applied = app.state_.active_profile == "channel-03" &&
+                app.state_.active_channel.rx_frequency_hz == 145425000;
+
+            click(300, 460);
+            const bool channel_page_open = app.page_ == 1;
+            click(42, 143);
+            click(42, 341);
+            const bool quick_configuration_changed =
+                app.quick_profile_ids_ == std::vector<std::string>{
+                    "channel-02", "channel-03", "channel-04"};
+            click(220, 341);
+            const bool non_quick_channel_opened = app.page_ == 2 &&
+                app.detail_profile_id_ == "channel-04";
+            click(485, 323);
+            const bool detail_activation_sent = app.pending_switch_profile_ == "channel-04";
+            app.update_runtime("{\"active_channel_profile_id\":\"channel-04\","
+                               "\"active_rx_frequency_hz\":145437500,"
+                               "\"active_tx_frequency_hz\":438537500}");
+            const bool detail_activation_synchronized = app.state_.active_profile == "channel-04" &&
+                app.state_.active_channel.rx_frequency_hz == 145437500;
+
+            click(100, 460);
+            click(94, 159);
+            app.update_runtime("{\"active_channel_profile_id\":\"channel-02\","
+                               "\"active_rx_frequency_hz\":145412500,"
+                               "\"active_tx_frequency_hz\":438512500}");
+            click(94, 159);
+            click(228, 159);
+            const bool active_card_then_other_card =
+                app.pending_switch_profile_ == "channel-03";
+            click(330, 215);
+            const bool forwarding_control_remains_clickable =
+                std::any_of(app.pending_.begin(), app.pending_.end(), [](const auto& item) {
+                    return item.second == "停止转发";
+                });
+
+            const YAML::Node persisted = YAML::LoadFile(test_path.string());
+            const YAML::Node quick = persisted["gui"]["quick_profile_ids"];
+            const bool quick_configuration_persisted = quick.IsSequence() && quick.size() == 3U &&
+                quick[0].as<std::string>() == "channel-02" &&
+                quick[1].as<std::string>() == "channel-03" &&
+                quick[2].as<std::string>() == "channel-04";
+            passed = first_quick_switch && repeated_quick_switch && old_response_ignored &&
+                latest_response_applied && channel_page_open && quick_configuration_changed &&
+                non_quick_channel_opened && detail_activation_sent &&
+                detail_activation_synchronized && active_card_then_other_card &&
+                forwarding_control_remains_clickable && quick_configuration_persisted;
+            app.shutdown_sdl();
+            initialized = false;
+        } catch (const std::exception& error) {
+            std::cerr << "GUI interaction self-test: " << error.what() << '\n';
+        }
+        std::error_code cleanup_error;
+        std::filesystem::remove(test_path, cleanup_error);
+        if (initialized) {
+            // Initialization failures are reported above; process teardown releases SDL.
+        }
+        return passed;
     }
 
     void configure_qa_view(const std::string& view)
@@ -1033,11 +1172,11 @@ private:
         font_small_ = TTF_OpenFont(config_.font_path.c_str(), 13);
         font_bold_ = TTF_OpenFont(config_.font_path.c_str(), 19);
         font_frequency_ = TTF_OpenFont(config_.font_path.c_str(), 25);
-        font_frequency_digits_ = TTF_OpenFont(config_.frequency_digit_font_path.c_str(), 25);
+        font_frequency_digits_ = TTF_OpenFont(config_.frequency_digit_font_path.c_str(), 31);
         if (!font_frequency_digits_) {
             std::cerr << "dmr_b210_gui: frequency digit font unavailable, using kiosk font: "
                       << config_.frequency_digit_font_path << '\n';
-            font_frequency_digits_ = TTF_OpenFont(config_.font_path.c_str(), 25);
+            font_frequency_digits_ = TTF_OpenFont(config_.font_path.c_str(), 31);
         }
         if (!font_small_ || !font_bold_ || !font_frequency_ || !font_frequency_digits_) {
             throw std::runtime_error("cannot open kiosk font sizes");
@@ -1190,6 +1329,7 @@ private:
                            std::chrono::steady_clock::now() - pending_switch_started_ >
                                std::chrono::seconds(8)) {
                     pending_switch_profile_.reset();
+                    latest_switch_request_id_.clear();
                     if (runtime_error.empty()) {
                         add_event("信道切换超时", kRed);
                     }
@@ -1474,7 +1614,9 @@ private:
                 add_event("校准已保存", kGreen);
             }
         }
-        if (ok && !switched_profile.empty()) {
+        const bool is_latest_switch_response = !switched_profile.empty() &&
+            request_id == latest_switch_request_id_;
+        if (ok && is_latest_switch_response) {
             // The switch command is queued for the RF owner. Apply the
             // cached channel immediately, then refresh from authoritative RF
             // status so every page follows the same active profile.
@@ -1493,8 +1635,10 @@ private:
             } catch (const std::exception& error) {
                 add_event(std::string("读取活动信道失败：") + error.what(), kRed);
             }
-        } else if (!ok && !switched_profile.empty()) {
+            latest_switch_request_id_.clear();
+        } else if (!ok && is_latest_switch_response) {
             pending_switch_profile_.reset();
+            latest_switch_request_id_.clear();
         }
         if (calibration_exit_after_save_ && calibration_.state == "committed" &&
             calibration_.session_id.empty()) {
@@ -1517,12 +1661,17 @@ private:
             action.rfind("读取", 0) == 0;
     }
 
+    static bool is_switch_request(const std::string& action)
+    {
+        return action == "切换信道" || action == "激活并保存" ||
+            action == "设置开机信道";
+    }
+
     bool controls_enabled() const
     {
         if (!state_.online) return false;
-        if (pending_switch_profile_) return false;
         return std::none_of(pending_.begin(), pending_.end(), [](const auto& item) {
-            return !is_background_request(item.second);
+            return !is_background_request(item.second) && !is_switch_request(item.second);
         });
     }
 
@@ -1585,21 +1734,21 @@ private:
         int digits_width = 0;
         int digits_height = 0;
         TTF_SizeUTF8(font_frequency_digits_, digits.c_str(), &digits_width, &digits_height);
-        const int label_width = 34;
+        const int label_width = 38;
         const int digits_x = box.x + label_width;
         const int unit_x = digits_x + digits_width + 6;
-        const int label_height = TTF_FontHeight(font_frequency_);
+        const int label_height = TTF_FontHeight(font_bold_);
         const int label_y = box.y + std::max(0, (box.h - label_height) / 2);
         const int digits_y = box.y + std::max(0, (box.h - digits_height) / 2);
-        const int unit_y = box.y + std::max(0, (box.h - label_height) / 2) + 7;
+        const int unit_y = box.y + std::max(0, (box.h - TTF_FontHeight(font_)) / 2) + 6;
         draw_text_clipped(label, box.x, label_y, kCyan,
-                          {box.x, box.y, label_width, box.h}, font_frequency_);
+                          {box.x, box.y, label_width, box.h}, font_bold_);
         draw_text_clipped(digits, digits_x, digits_y, kCyan,
                           {digits_x, box.y, box.w - label_width, box.h},
                           font_frequency_digits_);
         draw_text_clipped("MHz", unit_x, unit_y, kCyan,
                           {unit_x, box.y, std::max(0, box.x + box.w - unit_x), box.h},
-                          font_frequency_);
+                          font_);
     }
 
     void draw_box(SDL_Rect box, SDL_Color fill = kPanel)
@@ -1658,17 +1807,17 @@ private:
         const std::string channel_title = state_.active_profile.empty()
             ? "读取中"
             : channel_label(state_.active_profile);
-        draw_text_clipped(channel_title, 28, 78, kText, {28, 74, 420, 30}, font_bold_);
+        draw_text_clipped(channel_title, 398, 56, kText, {398, 52, 60, 28}, font_bold_);
         draw_home_frequency("RX", state_.active_channel.rx_frequency_hz,
-                            {28, 99, 205, 34});
+                            {28, 76, 430, 32});
         draw_home_frequency("TX", state_.active_channel.tx_frequency_hz,
-                            {250, 99, 208, 34});
-        draw_box({28, 134, 430, 1}, kLine);
+                            {28, 106, 430, 32});
+        draw_box({28, 140, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
             const int x = 28 + static_cast<int>(index) * 134;
             const bool active = profile_id == state_.active_profile;
-            add_button({x, 144, 133, 28}, channel_label(profile_id),
+            add_button({x, 145, 133, 28}, channel_label(profile_id),
                 active ? kCyan : kDark,
                 [this, profile_id] { request_switch(profile_id); }, controls_enabled(),
                 false, active ? kBackground : kText);
@@ -1916,6 +2065,7 @@ private:
                 (persist_active_profile ? "true" : "false"));
             track(request_id, action);
             switch_requests_[request_id] = id;
+            latest_switch_request_id_ = request_id;
             pending_switch_profile_ = id;
             pending_switch_started_ = std::chrono::steady_clock::now();
             add_event(action + "：等待确认", kAmber);
@@ -2978,6 +3128,7 @@ private:
     std::map<std::string, Channel> channels_;
     std::map<std::string, std::string> channel_requests_;
     std::map<std::string, std::string> switch_requests_;
+    std::string latest_switch_request_id_;
     std::optional<std::string> pending_switch_profile_;
     std::chrono::steady_clock::time_point pending_switch_started_{};
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
@@ -3012,7 +3163,8 @@ private:
 void usage(const char* program)
 {
     std::cout << "Usage: " << program
-              << " [--config PATH] [--stop-forwarding] [--self-test] [--qa-view VIEW]\n";
+              << " [--config PATH] [--stop-forwarding] [--self-test]"
+                 " [--interaction-self-test] [--qa-view VIEW]\n";
 }
 
 } // namespace
@@ -3022,12 +3174,14 @@ int main(int argc, char** argv)
     std::filesystem::path config_path = "/etc/dmr-rpt/gui.yaml";
     bool stop_only = false;
     bool self_test = false;
+    bool interaction_self_test = false;
     std::string qa_view;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--config" && index + 1 < argc) config_path = argv[++index];
         else if (argument == "--stop-forwarding") stop_only = true;
         else if (argument == "--self-test") self_test = true;
+        else if (argument == "--interaction-self-test") interaction_self_test = true;
         else if (argument == "--qa-view" && index + 1 < argc) qa_view = argv[++index];
         else if (argument == "--help" || argument == "-h") {
             usage(argv[0]);
@@ -3046,6 +3200,22 @@ int main(int argc, char** argv)
         return 1;
     }
     try {
+        if (interaction_self_test) {
+            GuiConfig interaction_config;
+            try {
+                if (std::filesystem::exists(config_path)) {
+                    interaction_config = load_config(config_path);
+                }
+            } catch (const std::exception& error) {
+                std::cerr << "GUI interaction self-test config fallback: " << error.what() << '\n';
+            }
+            if (GuiApp::interaction_self_test(std::move(interaction_config))) {
+                std::cout << "GUI interaction tests passed\n";
+                return 0;
+            }
+            std::cerr << "GUI interaction tests failed\n";
+            return 1;
+        }
         GuiApp app(load_config(config_path), stop_only);
         if (!qa_view.empty()) app.configure_qa_view(qa_view);
         return app.run();
