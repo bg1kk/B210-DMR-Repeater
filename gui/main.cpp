@@ -934,6 +934,18 @@ public:
             }
             app.state_.active_profile = "channel-01";
             app.state_.active_channel = app.channels_["channel-01"];
+            app.update_runtime("{\"active_channel_profile_id\":\"channel-01\","
+                               "\"forwarding_enabled\":true,\"rf_running\":false}");
+            const bool no_premature_forwarding_event = std::none_of(
+                app.events_.begin(), app.events_.end(), [](const EventLine& event) {
+                    return event.message == "转发已激活，转发频道为CH1";
+                });
+            app.update_runtime("{\"active_channel_profile_id\":\"channel-01\","
+                               "\"forwarding_enabled\":true,\"rf_running\":true}");
+            const bool startup_forwarding_event = std::any_of(
+                app.events_.begin(), app.events_.end(), [](const EventLine& event) {
+                    return event.message == "转发已激活，转发频道为CH1";
+                });
 
             const auto click = [&app](int x, int y) {
                 app.last_pointer_up_ = {};
@@ -998,6 +1010,18 @@ public:
                 std::any_of(app.pending_.begin(), app.pending_.end(), [](const auto& item) {
                     return item.second == "停止转发";
                 });
+            std::string stop_request;
+            for (const auto& item : app.pending_operations_) {
+                if (item.second == "stop_forwarding") stop_request = item.first;
+            }
+            app.update_response("{\"type\":\"response\",\"request_id\":\"" +
+                stop_request + "\",\"ok\":true,\"code\":\"accepted\"}");
+            app.update_runtime("{\"active_channel_profile_id\":\"channel-03\","
+                               "\"forwarding_enabled\":false,\"rf_running\":false}");
+            const bool forwarding_result_event = std::any_of(
+                app.events_.begin(), app.events_.end(), [](const EventLine& event) {
+                    return event.message == "转发已停止";
+                });
 
             const YAML::Node persisted = YAML::LoadFile(test_path.string());
             const YAML::Node quick = persisted["gui"]["quick_profile_ids"];
@@ -1005,11 +1029,13 @@ public:
                 quick[0].as<std::string>() == "channel-02" &&
                 quick[1].as<std::string>() == "channel-03" &&
                 quick[2].as<std::string>() == "channel-04";
-            passed = first_quick_switch && repeated_quick_switch && old_response_ignored &&
+            passed = no_premature_forwarding_event && startup_forwarding_event &&
+                first_quick_switch && repeated_quick_switch && old_response_ignored &&
                 latest_response_applied && channel_page_open && quick_configuration_changed &&
                 non_quick_channel_opened && detail_activation_sent &&
                 detail_activation_synchronized && active_card_then_other_card &&
-                forwarding_control_remains_clickable && quick_configuration_persisted;
+                forwarding_control_remains_clickable && forwarding_result_event &&
+                quick_configuration_persisted;
             app.shutdown_sdl();
             initialized = false;
         } catch (const std::exception& error) {
@@ -1248,10 +1274,12 @@ private:
         }
     }
 
-    void track(const std::string& id, const std::string& action)
+    void track(const std::string& id, const std::string& action,
+               const std::string& operation = {})
     {
         pending_[id] = action;
         pending_sent_at_[id] = std::chrono::steady_clock::now();
+        if (!operation.empty()) pending_operations_[id] = operation;
     }
 
     void expire_pending_requests()
@@ -1265,11 +1293,126 @@ private:
             const auto pending = pending_.find(it->first);
             if (pending != pending_.end()) {
                 const std::string action = pending->second;
+                const std::string operation = pending_operations_.count(it->first) != 0U
+                    ? pending_operations_[it->first] : "";
                 pending_.erase(pending);
-                if (action != "CAL query") add_event(action + "超时", kRed);
+                pending_operations_.erase(it->first);
+                channel_requests_.erase(it->first);
+                const auto switch_request = switch_requests_.find(it->first);
+                const bool superseded_switch = operation == "switch_channel" &&
+                    it->first != latest_switch_request_id_;
+                if (switch_request != switch_requests_.end()) {
+                    switch_requests_.erase(switch_request);
+                }
+                if (action != "CAL query") {
+                    add_event(superseded_switch
+                        ? action + "：已由新请求替代"
+                        : action + "失败：响应超时",
+                        superseded_switch ? kAmber : kRed);
+                }
+                if (it->first == pending_forwarding_request_id_) {
+                    pending_forwarding_target_.reset();
+                    pending_forwarding_request_id_.clear();
+                    pending_forwarding_action_.clear();
+                    pending_forwarding_accepted_ = false;
+                }
+                if (it->first == latest_switch_request_id_) {
+                    clear_switch_confirmation();
+                }
             }
             it = pending_sent_at_.erase(it);
         }
+        expire_state_confirmations(now);
+        maybe_announce_startup_forwarding();
+    }
+
+    void clear_switch_confirmation()
+    {
+        pending_switch_profile_.reset();
+        pending_switch_action_.clear();
+        pending_switch_accepted_ = false;
+        pending_switch_state_confirmed_ = false;
+        latest_switch_request_id_.clear();
+    }
+
+    void expire_state_confirmations(std::chrono::steady_clock::time_point now)
+    {
+        if (pending_forwarding_target_ && pending_forwarding_accepted_ &&
+            now - pending_forwarding_started_ > std::chrono::seconds(8)) {
+            add_event(pending_forwarding_action_ + "失败：状态确认超时", kRed);
+            pending_forwarding_target_.reset();
+            pending_forwarding_request_id_.clear();
+            pending_forwarding_action_.clear();
+            pending_forwarding_accepted_ = false;
+        }
+        if (pending_switch_profile_ && pending_switch_accepted_ &&
+            now - pending_switch_started_ > std::chrono::seconds(8)) {
+            add_event(pending_switch_action_ + "失败：状态确认超时", kRed);
+            clear_switch_confirmation();
+        }
+    }
+
+    void announce_forwarding_active()
+    {
+        add_event("转发已激活，转发频道为" + channel_label(state_.active_profile), kGreen);
+        startup_forwarding_announced_ = true;
+    }
+
+    bool initial_queries_pending() const
+    {
+        return std::any_of(pending_.begin(), pending_.end(), [](const auto& item) {
+            return item.second == "启动状态订阅" ||
+                item.second.rfind("读取", 0) == 0;
+        });
+    }
+
+    void maybe_announce_startup_forwarding()
+    {
+        if (startup_forwarding_announced_ || !state_.online ||
+            !forwarding_enabled_known_ || !rf_running_known_ ||
+            state_.active_profile.empty() || initial_queries_pending()) {
+            return;
+        }
+        if (state_.forwarding_enabled && state_.rf_running) {
+            announce_forwarding_active();
+        }
+    }
+
+    void evaluate_forwarding_confirmation()
+    {
+        if (!pending_forwarding_target_ || !pending_forwarding_accepted_ ||
+            !forwarding_enabled_known_ || !rf_running_known_) {
+            return;
+        }
+        if (!state_.last_error.empty()) {
+            add_event(pending_forwarding_action_ + "失败：" + state_.last_error, kRed);
+        } else {
+            const bool reached = *pending_forwarding_target_
+                ? state_.forwarding_enabled && state_.rf_running
+                : !state_.forwarding_enabled && !state_.rf_running;
+            if (!reached) return;
+            if (*pending_forwarding_target_) announce_forwarding_active();
+            else add_event("转发已停止", kGreen);
+        }
+        pending_forwarding_target_.reset();
+        pending_forwarding_request_id_.clear();
+        pending_forwarding_action_.clear();
+        pending_forwarding_accepted_ = false;
+    }
+
+    void evaluate_switch_confirmation()
+    {
+        if (!pending_switch_profile_ || !pending_switch_accepted_ ||
+            !pending_switch_state_confirmed_) {
+            return;
+        }
+        if (!state_.last_error.empty()) {
+            add_event(pending_switch_action_ + "失败：" + state_.last_error, kRed);
+        } else {
+            add_event(pending_switch_action_ + "成功：" +
+                      channel_label(*pending_switch_profile_), kGreen);
+        }
+        clear_switch_confirmation();
     }
 
     void retry_controller_connection()
@@ -1310,6 +1453,9 @@ private:
             state_.stale = stale;
             if (stale) {
                 state_.active_call = {};
+                startup_forwarding_announced_ = false;
+                forwarding_enabled_known_ = false;
+                rf_running_known_ = false;
                 add_event("状态订阅已中断", kRed);
             }
         }
@@ -1324,15 +1470,13 @@ private:
             bool accept_profile = true;
             if (pending_switch_profile_) {
                 if (*profile == *pending_switch_profile_) {
-                    pending_switch_profile_.reset();
+                    pending_switch_state_confirmed_ = true;
                 } else if (!runtime_error.empty() ||
                            std::chrono::steady_clock::now() - pending_switch_started_ >
                                std::chrono::seconds(8)) {
-                    pending_switch_profile_.reset();
-                    latest_switch_request_id_.clear();
-                    if (runtime_error.empty()) {
-                        add_event("信道切换超时", kRed);
-                    }
+                    add_event(pending_switch_action_ + "失败：" +
+                              (runtime_error.empty() ? "状态确认超时" : runtime_error), kRed);
+                    clear_switch_confirmation();
                 } else {
                     // RF reinitialization is asynchronous. Do not let an old
                     // status packet roll the GUI back while the target RF
@@ -1379,8 +1523,14 @@ private:
         if (const auto limit = json_number<std::uint64_t>(object, "recording_storage_limit_bytes")) {
             state_.recording_storage_limit_bytes = *limit;
         }
-        if (const auto forwarding = json_bool(object, "forwarding_enabled")) state_.forwarding_enabled = *forwarding;
-        if (const auto running = json_bool(object, "rf_running")) state_.rf_running = *running;
+        if (const auto forwarding = json_bool(object, "forwarding_enabled")) {
+            state_.forwarding_enabled = *forwarding;
+            forwarding_enabled_known_ = true;
+        }
+        if (const auto running = json_bool(object, "rf_running")) {
+            state_.rf_running = *running;
+            rf_running_known_ = true;
+        }
         if (const auto fault = json_bool(object, "rf_fault")) state_.rf_fault = *fault;
         state_.last_error = runtime_error;
         if (const auto version = json_string(object, "repeater_version")) {
@@ -1400,6 +1550,9 @@ private:
                 state_.gain_selection_mode = *selection;
             }
         }
+        evaluate_switch_confirmation();
+        evaluate_forwarding_confirmation();
+        maybe_announce_startup_forwarding();
     }
 
     void update_channel(const std::string& object, bool make_active)
@@ -1546,6 +1699,12 @@ private:
         const auto pending = pending_.find(request_id);
         const std::string action = pending == pending_.end() ? "UDP 命令" : pending->second;
         if (pending != pending_.end()) pending_.erase(pending);
+        const auto pending_operation = pending_operations_.find(request_id);
+        const std::string operation = pending_operation == pending_operations_.end()
+            ? "" : pending_operation->second;
+        if (pending_operation != pending_operations_.end()) {
+            pending_operations_.erase(pending_operation);
+        }
         const auto switch_request = switch_requests_.find(request_id);
         const std::string switched_profile = switch_request == switch_requests_.end()
             ? "" : switch_request->second;
@@ -1557,8 +1716,19 @@ private:
         const std::string code = json_string(frame, "code").value_or("错误");
         const std::string message = json_string(frame, "message").value_or("");
         if (!silent_calibration_query) {
-            if (ok) add_event(action + "：" + (message.empty() ? code : message), kGreen);
-            else add_event(action + "失败：" + (message.empty() ? code : message), kRed);
+            const bool superseded_switch = operation == "switch_channel" &&
+                request_id != latest_switch_request_id_;
+            const bool waits_for_runtime = operation == "start_forwarding" ||
+                operation == "stop_forwarding" || operation == "switch_channel";
+            if (!ok) {
+                add_event(action + "失败：" + (message.empty() ? code : message), kRed);
+            } else if (superseded_switch) {
+                add_event(action + "：已由新请求替代", kAmber);
+            } else if (waits_for_runtime) {
+                add_event(action + "：已受理，等待状态", kAmber);
+            } else {
+                add_event(action + "成功：" + (message.empty() ? code : message), kGreen);
+            }
         }
         const std::string state = json_object(frame, "state");
         if (!state.empty()) {
@@ -1617,6 +1787,7 @@ private:
         const bool is_latest_switch_response = !switched_profile.empty() &&
             request_id == latest_switch_request_id_;
         if (ok && is_latest_switch_response) {
+            pending_switch_accepted_ = true;
             // The switch command is queued for the RF owner. Apply the
             // cached channel immediately, then refresh from authoritative RF
             // status so every page follows the same active profile.
@@ -1635,10 +1806,20 @@ private:
             } catch (const std::exception& error) {
                 add_event(std::string("读取活动信道失败：") + error.what(), kRed);
             }
-            latest_switch_request_id_.clear();
+            evaluate_switch_confirmation();
         } else if (!ok && is_latest_switch_response) {
-            pending_switch_profile_.reset();
-            latest_switch_request_id_.clear();
+            clear_switch_confirmation();
+        }
+        if (request_id == pending_forwarding_request_id_) {
+            if (ok) {
+                pending_forwarding_accepted_ = true;
+                evaluate_forwarding_confirmation();
+            } else {
+                pending_forwarding_target_.reset();
+                pending_forwarding_request_id_.clear();
+                pending_forwarding_action_.clear();
+                pending_forwarding_accepted_ = false;
+            }
         }
         if (calibration_exit_after_save_ && calibration_.state == "committed" &&
             calibration_.session_id.empty()) {
@@ -1653,6 +1834,7 @@ private:
             action == "CAL gain" || action == "CAL auto") {
             request_calibration_refresh();
         }
+        maybe_announce_startup_forwarding();
     }
 
     static bool is_background_request(const std::string& action)
@@ -1680,7 +1862,15 @@ private:
     {
         if (!controls_enabled()) return;
         try {
-            track(client_.send(operation, fields), description);
+            const std::string request_id = client_.send(operation, fields);
+            track(request_id, description, operation);
+            if (operation == "start_forwarding" || operation == "stop_forwarding") {
+                pending_forwarding_target_ = operation == "start_forwarding";
+                pending_forwarding_request_id_ = request_id;
+                pending_forwarding_action_ = description;
+                pending_forwarding_accepted_ = false;
+                pending_forwarding_started_ = std::chrono::steady_clock::now();
+            }
             add_event(description + "：等待确认", kAmber);
         } catch (const std::exception& error) {
             add_event(std::string("UDP 发送失败：") + error.what(), kRed);
@@ -2070,10 +2260,13 @@ private:
                 "switch_channel", "\"profile_id\":\"" + json_escape(id) +
                 "\",\"persist_active_profile\":" +
                 (persist_active_profile ? "true" : "false"));
-            track(request_id, action);
+            track(request_id, action, "switch_channel");
             switch_requests_[request_id] = id;
             latest_switch_request_id_ = request_id;
             pending_switch_profile_ = id;
+            pending_switch_action_ = action;
+            pending_switch_accepted_ = false;
+            pending_switch_state_confirmed_ = false;
             pending_switch_started_ = std::chrono::steady_clock::now();
             add_event(action + "：等待确认", kAmber);
         } catch (const std::exception& error) {
@@ -2202,7 +2395,7 @@ private:
             const std::string request_id = client_.send("set_channel",
                 "\"profile_id\":\"" + json_escape(profile_id) + "\",\"" + key + "\":" +
                 std::to_string(value));
-            track(request_id, description);
+            track(request_id, description, "set_channel");
             channel_requests_[request_id] = profile_id;
             channel_refresh_due_[profile_id] = std::chrono::steady_clock::now() +
                 std::chrono::milliseconds(800);
@@ -2220,7 +2413,7 @@ private:
             const std::string request_id = client_.send("set_channel",
                 "\"profile_id\":\"" + json_escape(profile_id) + "\",\"" + key + "\":" +
                 (value ? "true" : "false"));
-            track(request_id, description);
+            track(request_id, description, "set_channel");
             channel_requests_[request_id] = profile_id;
             if (key == "fm_enabled") {
                 const auto channel = channels_.find(profile_id);
@@ -2571,7 +2764,7 @@ private:
                 std::to_string(draft_channel_.tx_gain_tenths_db) + ",\"fm_enabled\":" +
                 (draft_channel_.fm_enabled ? "true" : "false") + ",\"ctcss_tone_tenths_hz\":" +
                 std::to_string(draft_channel_.ctcss_tone_tenths_hz));
-            track(request_id, "保存 " + channel_label(profile_id));
+            track(request_id, "保存 " + channel_label(profile_id), "save_channel");
             channel_requests_[request_id] = profile_id;
             channel_refresh_due_[profile_id] = std::chrono::steady_clock::now() +
                 std::chrono::milliseconds(800);
@@ -3132,12 +3325,24 @@ private:
     CalibrationUiState calibration_;
     std::map<std::string, std::string> pending_;
     std::map<std::string, std::chrono::steady_clock::time_point> pending_sent_at_;
+    std::map<std::string, std::string> pending_operations_;
     std::map<std::string, Channel> channels_;
     std::map<std::string, std::string> channel_requests_;
     std::map<std::string, std::string> switch_requests_;
     std::string latest_switch_request_id_;
     std::optional<std::string> pending_switch_profile_;
+    std::string pending_switch_action_;
+    bool pending_switch_accepted_ = false;
+    bool pending_switch_state_confirmed_ = false;
     std::chrono::steady_clock::time_point pending_switch_started_{};
+    std::optional<bool> pending_forwarding_target_;
+    std::string pending_forwarding_request_id_;
+    std::string pending_forwarding_action_;
+    bool pending_forwarding_accepted_ = false;
+    std::chrono::steady_clock::time_point pending_forwarding_started_{};
+    bool forwarding_enabled_known_ = false;
+    bool rf_running_known_ = false;
+    bool startup_forwarding_announced_ = false;
     std::map<std::string, std::chrono::steady_clock::time_point> channel_refresh_due_;
     std::vector<EventLine> events_;
     std::vector<Hit> hits_;
