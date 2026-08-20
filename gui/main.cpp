@@ -1070,12 +1070,24 @@ public:
         } else if (view == "password") {
             page_ = 4;
             calibration_.authorized = false;
-        } else if (view == "calibration" || view == "dialog") {
+        } else if (view == "calibration" || view == "calibration-medium" ||
+                   view == "calibration-high" || view == "dialog") {
             page_ = 4;
             calibration_.authorized = true;
             calibration_.state = "active";
             calibration_.session_id = "qa-layout";
-            calibration_.next_input_dbm = kLowCalibrationInputDbm.front();
+            if (view == "calibration-medium") {
+                calibration_.band = "medium";
+                calibration_.selected_column = 1;
+                calibration_.next_input_dbm = kMediumCalibrationInputDbm.front();
+            } else if (view == "calibration-high") {
+                calibration_.band = "high";
+                calibration_.selected_column = 2;
+                calibration_.next_input_dbm = kHighCalibrationInputDbm.front();
+            } else {
+                calibration_.band = "low";
+                calibration_.next_input_dbm = kLowCalibrationInputDbm.front();
+            }
             if (view == "dialog") {
                 calibration_.completed_points = 5;
                 calibration_.next_input_dbm = kLowCalibrationInputDbm[5];
@@ -2882,11 +2894,13 @@ private:
     void draw_calibration_table(const std::string& band,
                                 const std::array<int, N>& inputs, int x)
     {
-        constexpr int table_y = 188;
+        constexpr int table_y = 186;
         constexpr int table_width = 744;
-        constexpr int table_height = 216;
+        constexpr int table_height = 236;
         constexpr int first_value_x_offset = 110;
         constexpr int value_width = 300;
+        constexpr int header_height = 38;
+        constexpr int row_height = 18;
         const int band_index = calibration_band_index(band);
         const bool session_active = calibration_step_available(calibration_) &&
             calibration_.band == band;
@@ -2896,14 +2910,14 @@ private:
             band == "medium" ? "中档校准" : "高档校准";
         draw_text_vcentered_clipped(range_name, x + 10,
                                     band == "high" ? kAmber : kCyan,
-                                    {x + 10, table_y + 5, 132, 20}, font_);
+                                    {x + 10, table_y + 3, 132, 18}, font_);
         draw_text_vcentered_clipped(
             std::to_string(inputs.front()) + " 至 " +
                 std::to_string(inputs.back()) + " dBm",
             x + 150, kMuted,
-            {x + 150, table_y + 7, 220, 18}, font_small_);
+            {x + 150, table_y + 3, 220, 18}, font_small_);
         draw_text_vcentered_clipped("dBm", x + 12, kMuted,
-                                    {x + 12, table_y + 29, 46, 18}, font_small_);
+                                    {x + 12, table_y + 20, 70, 18}, font_small_);
 
         for (int rx = 0; rx < 2; ++rx) {
             const int column = rx * 3 + band_index;
@@ -2912,23 +2926,25 @@ private:
                 ? calibration_.column_gain[static_cast<std::size_t>(column)].value_or(0)
                 : 0;
             draw_text_vcentered_clipped(
-                "RX" + std::to_string(rx + 1) + " " + gain_text(gain), value_x,
-                kMuted, {value_x, table_y + 29, value_width - 4, 18}, font_small_);
+                "RX" + std::to_string(rx + 1) + " dBFS  增益 " + gain_text(gain),
+                value_x, kMuted,
+                {value_x, table_y + 20, value_width - 4, 18}, font_small_);
         }
 
         for (std::size_t row = 0; row < inputs.size(); ++row) {
             const int input = inputs[row];
-            const int row_y = table_y + 50 + static_cast<int>(row) * 14;
+            const int row_y = table_y + header_height +
+                static_cast<int>(row) * row_height;
             draw_text_vcentered_clipped(std::to_string(input), x + 12, kText,
-                                        {x + 12, row_y, 46, 13}, font_small_);
+                                        {x + 12, row_y, 70, row_height}, font_small_);
             for (int rx = 0; rx < 2; ++rx) {
                 const int column = rx * 3 + band_index;
                 const int value_x = x + first_value_x_offset + rx * value_width;
                 const bool current_point = session_active &&
                     calibration_.rx_channel == rx &&
                     *calibration_.next_input_dbm == input;
-                draw_box({value_x, row_y, value_width - 4, 13},
-                         current_point ? kCyan : kDark);
+                draw_box({value_x, row_y, value_width - 4, row_height - 1},
+                          current_point ? kCyan : kDark);
                 const auto found = calibration_.column_points[
                     static_cast<std::size_t>(column)].find(input);
                 std::string value = current_point ? "待测" : "--";
@@ -2943,7 +2959,8 @@ private:
                                             found == calibration_.column_points[
                                                 static_cast<std::size_t>(column)].end()
                                                 ? kMuted : kCyan,
-                                            {value_x + 5, row_y, value_width - 12, 13},
+                                            {value_x + 5, row_y, value_width - 12,
+                                             row_height},
                                             font_small_);
             }
         }
@@ -2959,15 +2976,18 @@ private:
         draw_text("RSSI校准", 24, 58, kText, font_bold_);
         add_button({646, 54, 126, 28}, "返回状态", kDark,
                    [this] { request_calibration_exit(3); }, controls_enabled());
-        draw_text("当前输入", 24, 86, kMuted, font_small_);
         const Receiver& receiver = state_.receivers[static_cast<std::size_t>(calibration_.rx_channel)];
         std::ostringstream live;
-        live << "RX" << (calibration_.rx_channel + 1) << "  " << std::fixed
+        live << "输入 RX" << (calibration_.rx_channel + 1) << "  " << std::fixed
              << std::setprecision(1)
-             << (receiver.rssi_valid ? receiver.rssi_dbfs : 0.0) << " dBFS  SNR "
-             << (receiver.snr_valid ? receiver.snr_db : 0.0) << " dB";
-        draw_text_clipped(receiver.rssi_valid ? live.str() : "RX --", 104, 86, kCyan,
-                          {104, 82, 258, 24}, font_small_);
+             << (receiver.rssi_valid ? receiver.rssi_dbfs : 0.0) << " dBFS";
+        draw_text_clipped(receiver.rssi_valid ? live.str() : "输入 RX --", 24, 86,
+                          kCyan, {24, 82, 220, 22}, font_small_);
+        std::ostringstream snr;
+        snr << "SNR " << std::fixed << std::setprecision(1)
+            << (receiver.snr_valid ? receiver.snr_db : 0.0) << " dB";
+        draw_text_clipped(snr.str(), 246, 86, kCyan,
+                          {246, 82, 116, 22}, font_small_);
         const std::string analog_gain = receiver.analog_gain_valid
             ? gain_text(static_cast<int>(std::lround(receiver.analog_gain_db * 10.0)))
             : "--";
@@ -2985,43 +3005,43 @@ private:
             ? gain_text(static_cast<int>(std::lround(
                 receiver.rssi_gain_compensation_db * 10.0)))
             : "--";
-        draw_text_clipped("硬件AGC " + std::string(receiver.hardware_agc_enabled ? "开" : "关"),
-                          370, 82, receiver.hardware_agc_enabled ? kGreen : kAmber,
-                          {370, 80, 96, 22}, font_small_);
-        draw_text_clipped("硬件增益 " + analog_gain, 470, 82, kCyan,
-                          {470, 80, 174, 22}, font_small_);
-        draw_text_clipped("软件AGC增益 " + software_gain, 370, 102, kMuted,
-                          {370, 100, 174, 20}, font_small_);
-        draw_text_clipped("输入 " + agc_input.str(), 548, 102, kMuted,
-                          {548, 100, 116, 20}, font_small_);
-        draw_text_clipped("补偿 " + compensation, 666, 102, kCyan,
-                          {666, 100, 100, 20}, font_small_);
+        draw_text_clipped("硬件AGC：" + std::string(receiver.hardware_agc_enabled ? "开" : "关"),
+                          370, 86, receiver.hardware_agc_enabled ? kGreen : kAmber,
+                          {370, 82, 112, 22}, font_small_);
+        draw_text_clipped("硬件增益：" + analog_gain, 490, 86, kCyan,
+                          {490, 82, 178, 22}, font_small_);
+        draw_text_clipped("软件AGC：" + software_gain, 24, 98, kMuted,
+                          {24, 96, 176, 22}, font_small_);
+        draw_text_clipped("AGC输入：" + agc_input.str(), 208, 98, kMuted,
+                          {208, 96, 176, 22}, font_small_);
+        draw_text_clipped("补偿：" + compensation, 392, 98, kCyan,
+                          {392, 96, 150, 22}, font_small_);
         const bool calibration_selection_enabled = controls_enabled() &&
             calibration_.session_id.empty();
-        add_button({24, 122, 76, 28}, "RX1", calibration_.rx_channel == 0 ? kCyan : kDark,
+        add_button({24, 122, 70, 28}, "RX1", calibration_.rx_channel == 0 ? kCyan : kDark,
                     [this] { select_calibration_column(calibration_band_index(calibration_.band)); }, calibration_selection_enabled);
-        add_button({108, 122, 76, 28}, "RX2", calibration_.rx_channel == 1 ? kCyan : kDark,
+        add_button({100, 122, 70, 28}, "RX2", calibration_.rx_channel == 1 ? kCyan : kDark,
                     [this] { select_calibration_column(3 + calibration_band_index(calibration_.band)); }, calibration_selection_enabled);
-        add_button({196, 122, 60, 28}, "低档", calibration_.band == "low" ? kCyan : kDark,
+        add_button({180, 122, 58, 28}, "低档", calibration_.band == "low" ? kCyan : kDark,
                     [this] { select_calibration_column(calibration_.rx_channel * 3); }, calibration_selection_enabled);
-        add_button({264, 122, 60, 28}, "中档", calibration_.band == "medium" ? kCyan : kDark,
+        add_button({244, 122, 58, 28}, "中档", calibration_.band == "medium" ? kCyan : kDark,
                     [this] { select_calibration_column(calibration_.rx_channel * 3 + 1); }, calibration_selection_enabled);
-        add_button({332, 122, 60, 28}, "高档", calibration_.band == "high" ? kCyan : kDark,
+        add_button({308, 122, 58, 28}, "高档", calibration_.band == "high" ? kCyan : kDark,
                     [this] { select_calibration_column(calibration_.rx_channel * 3 + 2); }, calibration_selection_enabled);
         const int gain = selected_calibration_gain(calibration_);
-        draw_text_vcentered_clipped("增益 " + gain_text(gain), 400, kCyan,
-                                    {400, 122, 104, 28}, font_small_);
-        add_button({510, 122, 58, 28}, "自动", kDark,
+        draw_text_vcentered_clipped("增益 " + gain_text(gain), 374, kCyan,
+                                    {374, 122, 118, 28}, font_small_);
+        add_button({500, 122, 58, 28}, "自动", kDark,
                    [this] { auto_calibration_gain(); },
                    calibration_selection_enabled && calibration_.band != "low");
-        add_button({574, 122, 42, 28}, "-", kDark,
+        add_button({564, 122, 42, 28}, "-", kDark,
                    [this] { set_calibration_gain(-10); },
                    calibration_selection_enabled && calibration_.band != "low");
-        add_button({622, 122, 42, 28}, "+", kDark,
+        add_button({612, 122, 42, 28}, "+", kDark,
                    [this] { set_calibration_gain(10); },
                    calibration_selection_enabled && calibration_.band != "low");
         draw_text_vcentered_clipped(calibration_.band == "low" ? "固定" : "启动时写入",
-                                    672, kMuted, {672, 122, 96, 28}, font_small_);
+                                    662, kMuted, {662, 122, 106, 28}, font_small_);
         add_button({24, 154, 90, 28}, "开始", kGreen,
                    [this] { begin_selected_calibration(); },
                    controls_enabled() && calibration_.session_id.empty());
