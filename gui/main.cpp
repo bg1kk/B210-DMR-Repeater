@@ -1715,6 +1715,25 @@ private:
         SDL_FreeSurface(surface);
     }
 
+    void draw_text_scaled_clipped(const std::string& text, SDL_Rect target,
+                                  SDL_Color color, SDL_Rect clip,
+                                  TTF_Font* font = nullptr)
+    {
+        TTF_Font* selected = font ? font : font_;
+        SDL_Surface* surface = TTF_RenderUTF8_Blended(selected, text.c_str(), color);
+        if (!surface) return;
+        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer_, surface);
+        if (!texture) {
+            SDL_FreeSurface(surface);
+            return;
+        }
+        SDL_RenderSetClipRect(renderer_, &clip);
+        SDL_RenderCopy(renderer_, texture, nullptr, &target);
+        SDL_RenderSetClipRect(renderer_, nullptr);
+        SDL_DestroyTexture(texture);
+        SDL_FreeSurface(surface);
+    }
+
     void draw_text_vcentered_clipped(const std::string& text, int x,
                                      SDL_Color color, SDL_Rect box,
                                      TTF_Font* font = nullptr)
@@ -1728,27 +1747,15 @@ private:
     }
 
     void draw_home_frequency(const std::string& label, std::int64_t value,
-                             SDL_Rect box)
+                             int label_x, int digits_x, int unit_x)
     {
         const std::string digits = frequency_numeric_text(value);
-        int digits_width = 0;
-        int digits_height = 0;
-        TTF_SizeUTF8(font_frequency_digits_, digits.c_str(), &digits_width, &digits_height);
-        const int label_width = 38;
-        const int digits_x = box.x + label_width;
-        const int unit_x = digits_x + digits_width + 6;
-        const int label_height = TTF_FontHeight(font_bold_);
-        const int label_y = box.y + std::max(0, (box.h - label_height) / 2);
-        const int digits_y = box.y + std::max(0, (box.h - digits_height) / 2);
-        const int unit_y = box.y + std::max(0, (box.h - TTF_FontHeight(font_)) / 2) + 6;
-        draw_text_clipped(label, box.x, label_y, kCyan,
-                          {box.x, box.y, label_width, box.h}, font_bold_);
-        draw_text_clipped(digits, digits_x, digits_y, kCyan,
-                          {digits_x, box.y, box.w - label_width, box.h},
-                          font_frequency_digits_);
-        draw_text_clipped("MHz", unit_x, unit_y, kCyan,
-                          {unit_x, box.y, std::max(0, box.x + box.w - unit_x), box.h},
-                          font_);
+        draw_text_clipped(label, label_x, 95, kCyan,
+                          {label_x, 91, 42, 36}, font_bold_);
+        draw_text_scaled_clipped(digits, {digits_x, 52, 120, 64}, kCyan,
+                                 {digits_x, 45, 132, 88}, font_frequency_digits_);
+        draw_text_clipped("MHz", unit_x, 101, kCyan,
+                          {unit_x, 94, 42, 36}, font_);
     }
 
     void draw_box(SDL_Rect box, SDL_Color fill = kPanel)
@@ -1807,11 +1814,11 @@ private:
         const std::string channel_title = state_.active_profile.empty()
             ? "读取中"
             : channel_label(state_.active_profile);
-        draw_text_clipped(channel_title, 398, 56, kText, {398, 52, 60, 28}, font_bold_);
+        draw_text_clipped(channel_title, 28, 95, kText, {28, 91, 50, 36}, font_bold_);
         draw_home_frequency("RX", state_.active_channel.rx_frequency_hz,
-                            {28, 76, 430, 32});
+                            86, 114, 234);
         draw_home_frequency("TX", state_.active_channel.tx_frequency_hz,
-                            {28, 106, 430, 32});
+                            274, 298, 438);
         draw_box({28, 140, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
