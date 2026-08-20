@@ -1816,9 +1816,9 @@ private:
             : channel_label(state_.active_profile);
         draw_text_clipped(channel_title, 28, 95, kText, {28, 91, 50, 36}, font_bold_);
         draw_home_frequency("RX", state_.active_channel.rx_frequency_hz,
-                            86, 114, 234);
+                            86, 114, 238);
         draw_home_frequency("TX", state_.active_channel.tx_frequency_hz,
-                            274, 298, 438);
+                            274, 302, 426);
         draw_box({28, 140, 430, 1}, kLine);
         for (std::size_t index = 0; index < quick_profile_ids_.size() && index < 3U; ++index) {
             const std::string profile_id = quick_profile_ids_[index];
